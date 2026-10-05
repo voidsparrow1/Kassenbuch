@@ -25,7 +25,7 @@
     return 255;
   }
 
-  // Papierbereich: Zeilen/Spalten mit vielen hellen Pixeln. Rückgabe in Koordinaten des Originals.
+  // Papierbereich: Spalten mit vielen hellen Pixeln. Rückgabe in Koordinaten des Originals.
   function findPaper(img) {
     const W0 = img.naturalWidth || img.width, H0 = img.naturalHeight || img.height;
     const s = Math.min(1, 400 / W0);
@@ -34,16 +34,15 @@
     c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
     const g = grayFrom(c), W = c.width, H = c.height;
     const t = percentile(g, 0.75) * 0.9;
-    const colHits = new Uint32Array(W), rowHits = new Uint32Array(H);
-    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (g[y * W + x] > t) { colHits[x]++; rowHits[y]++; }
-    let x0 = -1, x1 = -1, y0 = -1, y1 = -1;
-    for (let x = 0; x < W; x++) if (colHits[x] > H * 0.3) { if (x0 < 0) x0 = x; x1 = x; }
-    for (let y = 0; y < H; y++) if (rowHits[y] > W * 0.15) { if (y0 < 0) y0 = y; y1 = y; }
-    if (x0 < 0 || y0 < 0 || x1 - x0 < 10 || y1 - y0 < 10) return { x: 0, y: 0, w: W0, h: H0 };
-    const pad = 10;
-    x0 = Math.max(0, x0 - pad); y0 = Math.max(0, y0 - pad);
-    x1 = Math.min(W - 1, x1 + pad); y1 = Math.min(H - 1, y1 + pad);
-    return { x: x0 / s, y: y0 / s, w: (x1 - x0 + 1) / s, h: (y1 - y0 + 1) / s };
+    const colHits = new Uint32Array(W);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (g[y * W + x] > t) colHits[x]++;
+    let x0 = -1, x1 = -1;
+    for (let x = 0; x < W; x++) if (colHits[x] > H * 0.25) { if (x0 < 0) x0 = x; x1 = x; }
+    // Nur seitlich zuschneiden: oben/unten kann der Bon im Schatten liegen und würde sonst abgeschnitten
+    if (x0 < 0 || x1 - x0 < W * 0.2) return { x: 0, y: 0, w: W0, h: H0 };
+    const pad = Math.round(W * 0.03);
+    x0 = Math.max(0, x0 - pad); x1 = Math.min(W - 1, x1 + pad);
+    return { x: x0 / s, y: 0, w: (x1 - x0 + 1) / s, h: H0 };
   }
 
   // Separabler Maximum-Filter (Radius r): entfernt dünne Schrift aus der Hintergrundschätzung
@@ -117,8 +116,25 @@
       const v = Math.max(0, Math.min(255, (out[i] - lo) * k));
       d[j] = d[j + 1] = d[j + 2] = v; d[j + 3] = 255;
     }
+    removeLines(d, W, H);
     ctx.putImageData(id, 0, 0);
     return c;
+  }
+
+  // Waagerechte Rahmen- und Trennlinien (Kästen um Überschriften, "-----") weiß machen.
+  // Eine Pixelzeile mit einem langen dunklen Lauf ist nie Schrift. Gestrichelte Linien werden über
+  // den Anteil dunkler Pixel in der Zeile erkannt.
+  function removeLines(d, W, H) {
+    const dark = function (i) { return d[i * 4] < 140; };
+    for (let y = 0; y < H; y++) {
+      let run = 0, best = 0, cnt = 0;
+      for (let x = 0; x < W; x++) {
+        if (dark(y * W + x)) { run++; cnt++; if (run > best) best = run; } else run = 0;
+      }
+      if (best > W * 0.25 || cnt > W * 0.55) {
+        for (let x = 0; x < W; x++) { const j = (y * W + x) * 4; d[j] = d[j + 1] = d[j + 2] = 255; }
+      }
+    }
   }
 
   root.BonBild = { prepare: prepare, findPaper: findPaper };

@@ -5,6 +5,7 @@
   const K = window.Kassenbuch;
   const $ = (id) => document.getElementById(id);
 
+  const APP_VERSION = 9;   // sichtbar unten in der Liste – zum Prüfen, ob ein Update angekommen ist
   const USE_SW = 'serviceWorker' in navigator && !/[?&]nosw\b/.test(location.search);
   const abs = (p) => new URL(p, location.href).href;
 
@@ -153,6 +154,7 @@
       b.addEventListener('click', openStart);
       list.append(head, b);
     }
+    list.appendChild(el('div', 'version', 'App-Version ' + APP_VERSION));
   }
 
   // ---------- Formulare ----------
@@ -414,6 +416,7 @@
       entry = { typ: 'zbon', datum: z.datum, u19: z.u19, u7: z.u7, u0: z.u0, ec: z.ec, gutschein: z.gutschein, aus: z.aus, ein: z.ein, abl: z.abl };
       extra.barLautBon = z.barLautBon;
       if (!failed && !z.u19 && !z.u7 && !z.u0) flagged.u19 = 'Umsätze nicht erkannt – bitte vom Bon abtippen';
+      if (z.korrigiert && z.korrigiert !== 'barLautBon') flagged[z.korrigiert] = 'Lesefehler 0/8 automatisch korrigiert – bitte mit dem Bon vergleichen';
     } else {
       const r = P.combine(P.parseOcrText(text), qr);
       entry = { typ: 'ausgabe', datum: r.datum, text: r.haendler, betrag: r.betrag };

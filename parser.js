@@ -99,28 +99,42 @@
   }
 
   // Nur Daten aus den letzten 2 Jahren bis heute gelten als plausibel.
-  // Von mehreren plausiblen Daten gewinnt das neueste (Kaufdatum steht meist unten,
-  // ältere Zahlenfolgen wie Artikel- oder Filialnummern werden so verworfen).
+  // Bewertung je Kandidat: Datum steht allein in der Zeile (+3), direkt bei "Umsatz gelöscht" (+3),
+  // kommt mehrfach vor (+2 je Wiederholung). Bei Gleichstand gewinnt das neuere Datum.
+  // Zeilen wie "C 13.08.2026 12:00" (Beginn des Abrechnungszeitraums) zählen weniger.
   function findDate(text, now) {
     const today = now || new Date();
     const todayIso = today.getFullYear() + '-' + pad(today.getMonth() + 1) + '-' + pad(today.getDate());
     const minIso = (today.getFullYear() - 2) + '-' + pad(today.getMonth() + 1) + '-' + pad(today.getDate());
     const ok = function (d) { return d && d >= minIso && d <= todayIso; };
-    const found = [];
-    const re = /(?:^|[^\d])(\d{1,2})\s?[.\/-]\s?(\d{1,2})\s?[.\/-]\s?(\d{4}|\d{2})(?!\d)/g;
-    let m;
-    while ((m = re.exec(text))) {
-      const d = isoDate(parseInt(m[3], 10), parseInt(m[2], 10), parseInt(m[1], 10));
-      if (ok(d)) found.push(d);
-      re.lastIndex = m.index + 1; // überlappende Treffer zulassen
-    }
+    const lines = String(text || '').split(/\r?\n/);
+    const cand = {};
+    const DATE_RE = /(?:^|[^\d])(\d{1,2})\s?[.\/-]\s?(\d{1,2})\s?[.\/-]\s?(\d{4}|\d{2})(?!\d)/g;
+    lines.forEach(function (line, i) {
+      const near = /gel[öo]scht|abschluss\s*vom|datum/i.test(line) || (i > 0 && /gel[öo]scht/i.test(lines[i - 1]));
+      const rest = line.replace(DATE_RE, ' ').replace(/\d{1,2}:\d{2}(?::\d{2})?/g, ' ').replace(/[\s|.,:;'"`_\-]/g, '');
+      const alone = rest.length <= 3;
+      const period = /^\W*[cC]\s/.test(line);
+      let m;
+      DATE_RE.lastIndex = 0;
+      while ((m = DATE_RE.exec(line))) {
+        const d = isoDate(parseInt(m[3], 10), parseInt(m[2], 10), parseInt(m[1], 10));
+        DATE_RE.lastIndex = m.index + 1;
+        if (!ok(d)) continue;
+        const c = cand[d] || (cand[d] = { d: d, score: -2 });
+        c.score += 2 + (alone ? 3 : 0) + (near ? 3 : 0) - (period ? 2 : 0);
+      }
+    });
     const isoRe = /(20\d{2})-(\d{2})-(\d{2})/g;
-    while ((m = isoRe.exec(text))) {
+    let m;
+    while ((m = isoRe.exec(text || ''))) {
       const d = isoDate(+m[1], +m[2], +m[3]);
-      if (ok(d)) found.push(d);
+      if (ok(d)) { const c = cand[d] || (cand[d] = { d: d, score: -2 }); c.score += 2; }
     }
-    if (!found.length) return null;
-    return found.sort().pop();
+    const list = Object.keys(cand).map(function (k) { return cand[k]; });
+    if (!list.length) return null;
+    list.sort(function (a, b) { return b.score - a.score || (a.d < b.d ? 1 : -1); });
+    return list[0].d;
   }
 
   // Schlüsselwörter für die Endsumme, nach Verlässlichkeit sortiert
@@ -273,25 +287,28 @@
     return best;
   }
 
+  // "53.15 von 812.40" – erkennt die Zeile auch ohne Überschrift (OCR-Varianten: "uon", "v0n", "vom")
+  const VON_RE = /\d\s?[.,]\s?\d{2}\s*\S?\s*\b[vu][o0][nm]\b\s*-?\d/i;
+
   function parseTaxBlock(lines) {
-    const start = lines.findIndex(function (l) { return /mehrwert|^\W*mwst\W*$/i.test(l); });
-    if (start < 0) return null;
-    const sums = {}, seen = {};
-    let hint = null;
-    for (let i = start + 1; i < lines.length; i++) {
+    const sums = {}, seen = {}, items = [];
+    let hint = null, inBlock = false;
+    for (let i = 0; i < lines.length; i++) {
       const l = lines[i];
-      if (/umsatz\s*gel|gel[öo]scht|^\W*summe\b|^\W*gesamt/i.test(l) && !/von/i.test(l)) break;
+      if (/mehr.{0,4}steuer|mehrwert|^\W*mwst\W*$/i.test(l)) { inBlock = true; continue; }
+      if (inBlock && /umsatz\s*gel|gel[öo]scht|^\W*summe\b|^\W*gesamt/i.test(l) && !VON_RE.test(l)) inBlock = false;
       const m = l.match(/(\d{1,2})\s?[.,]\s?(\d{2})\s?%/g);
+      if (m) hint = parseInt(m[m.length - 1].replace(/^\D*?(\d{1,2})\s?[.,].*$/, '$1'), 10);
       const a = amountsIn(stripPct(l)).map(Math.abs);
-      if (m) hint = parseInt(m[m.length - 1].slice(-8).replace(/^\D*?(\d{1,2})\s?[.,].*$/, '$1'), 10);
-      if (a.length >= 2 && (/v[o0]n/i.test(l) || !m)) {
+      if (a.length >= 2 && (VON_RE.test(l) || (inBlock && !m))) {
         const res = inferRate(a[0], a[a.length - 1], hint);
         sums[res.r] = (sums[res.r] || 0) + res.brutto; seen[res.r] = true;
+        items.push({ r: res.r, brutto: res.brutto });
         hint = null;
       }
     }
     if (!Object.keys(seen).length) return null;
-    return { u19: sums[19] || null, u7: sums[7] || null, u0: sums[0] || null };
+    return { u19: sums[19] || null, u7: sums[7] || null, u0: sums[0] || null, items: items };
   }
 
   // Block "Zahlungsmittel": Abschnitte "Bar", "(EC)", "(Gutschein)" … mit Zahlungen, Rückgeld, Ausgaben …
@@ -299,13 +316,24 @@
     ['stockgeld', /stockgeld/i], ['ablieferung', /ablieferung/i], ['soll', /\bsoll\b/i], ['ist', /\bist\b/i], ['differenz', /differenz/i]];
 
   function parsePayments(lines) {
-    const start = lines.findIndex(function (l) { return /zahlungsmittel|zahlungsarten/i.test(l); });
-    if (start < 0) return null;
+    // Beginn: Überschrift "Zahlungsmittel" (oft eingerahmt und unlesbar) oder der Abschnitt "Bar"
+    let start = lines.findIndex(function (l) { return /zahlungsmittel|zahlungsarten/i.test(l); });
+    if (start < 0) {
+      const bar = lines.findIndex(function (l) { return /^\W*bar\W*(?:€|e|ε|c)?\W*$/i.test(l); });
+      if (bar >= 0) start = bar - 1;
+    }
+    let implicitBar = false;
+    if (start < 0) {
+      const z = lines.findIndex(function (l) { return /zahlungen/i.test(l); });
+      if (z < 0) return null;
+      start = z - 1; implicitBar = true;
+    }
     const secs = [];
     let sec = null;
+    if (implicitBar) { sec = { name: 'bar', v: {} }; secs.push(sec); }
     for (let i = start + 1; i < lines.length; i++) {
       const l = lines[i];
-      if (/auf[\s\-\/]*ab|abschlag|mehrwert|warengruppe/i.test(l)) break;
+      if (/auf[\s\-\/=]*ab|abschlag|mehrwert|warengruppe/i.test(l) || VON_RE.test(l)) break;
       const key = PAY_KEYS.find(function (k) { return k[1].test(l); });
       if (!key) {
         if (amountsIn(l).length) continue;                       // z. B. "1 EC = 1.00 €"
@@ -314,21 +342,32 @@
         continue;
       }
       if (!sec) continue;
-      const v = absLast(l);
+      let v = absLast(l);
+      const count = l.match(/^\W*(\d+)\s+[A-Za-zÄÖÜäöü]/);
+      if (count && /^0+$/.test(count[1]) && /einnahmen|ausgaben|stockgeld|ablieferung/.test(key[0])) v = 0;
       if (v !== null && !(key[0] in sec.v)) sec.v[key[0]] = v;
     }
     if (!secs.length) return null;
     const res = { ec: null, gutschein: null, barLautBon: null, aus: null, ein: null, abl: null };
-    const nz = function (v) { return v ? v : null; };
+    const nz = function (v) { return v && v >= 100 ? v : null; };
     const plus = function (a, b) { return b ? (a || 0) + b : a; };
-    for (const s of secs) {
+    secs.forEach(function (s, idx) {
       const v = s.v, paid = v.zahlungen !== undefined ? v.zahlungen : v.soll;
-      if (/(^|\s)bar(\s|$)/.test(s.name)) {
+      const other = /gutsch|(^|\s)ec(\s|$)|karte|giro|kredit|visa|master|maestro|unbar/.test(s.name);
+      // "Bar" steht immer als erster Abschnitt; die Überschrift ist oft unleserlich ("ar", "8ar")
+      if (/(^|\s)bar(\s|$)/.test(s.name) || (idx === secs.findIndex(function (x) { return 'zahlungen' in x.v; }) && !other)) {
+        // Nebenwerte nur übernehmen, wenn sie zum Soll passen (sonst Lesefehler wie "0.08")
+        if (v.soll !== undefined && v.zahlungen !== undefined) {
+          const base = v.zahlungen - (v.rueckgeld || 0) + (v.stockgeld || 0);
+          const full = base + (v.einnahmen || 0) - (v.ausgaben || 0) - (v.ablieferung || 0);
+          if (full !== v.soll && base === v.soll) { v.einnahmen = 0; v.ausgaben = 0; v.ablieferung = 0; }
+        }
         if (v.zahlungen !== undefined) res.barLautBon = v.zahlungen - (v.rueckgeld || 0);
+        res._bar = { zahlungen: v.zahlungen, rueckgeld: v.rueckgeld || 0 };
         res.ein = nz(v.einnahmen); res.aus = nz(v.ausgaben); res.abl = nz(v.ablieferung);
       } else if (/gutsch/.test(s.name)) res.gutschein = plus(res.gutschein, paid);
-      else if (/(^|\s)ec(\s|$)|karte|giro|kredit|visa|master|maestro|unbar/.test(s.name)) res.ec = plus(res.ec, paid);
-    }
+      else if (other) res.ec = plus(res.ec, paid);
+    });
     return res;
   }
 
@@ -361,7 +400,47 @@
     if (tax) { out.u19 = tax.u19; out.u7 = tax.u7; out.u0 = tax.u0; }
     const pay = parsePayments(lines);
     if (pay) Object.assign(out, pay);
+    out.korrigiert = null;
+    if (tax && pay && pay._bar && pay._bar.zahlungen !== undefined) reconcile(out, tax.items, pay._bar);
+    delete out._bar;
     return out;
+  }
+
+  // Gegenprobe: Summe der Umsätze = Bar (Zahlungen − Rückgeld) + EC + Gutscheine.
+  // Geht sie nicht auf und behebt genau ein Ziffern-Tausch 8→0 die Differenz (die Texterkennung liest
+  // bei diesem Druckbild eine 0 gelegentlich als 8, nie umgekehrt),
+  // wird dieser Wert korrigiert und im Ergebnis vermerkt.
+  function swaps(c) {
+    const str = String(c), out = [];
+    for (let i = 0; i < str.length; i++) {
+      if (str[i] === '8') out.push(parseInt(str.slice(0, i) + '0' + str.slice(i + 1), 10));
+    }
+    return out;
+  }
+  function reconcile(z, items, bar) {
+    const n = function (v) { return v || 0; };
+    const sales = items.reduce(function (a, it) { return a + it.brutto; }, 0);
+    const paid = function (zahl, rueck, ec) { return zahl - rueck + ec + n(z.gutschein); };
+    if (sales === paid(bar.zahlungen, bar.rueckgeld, n(z.ec))) return;
+    const fixes = [];
+    items.forEach(function (it, i) {
+      swaps(it.brutto).forEach(function (v) {
+        if (sales - it.brutto + v === paid(bar.zahlungen, bar.rueckgeld, n(z.ec))) fixes.push({ kind: 'item', i: i, v: v });
+      });
+    });
+    swaps(bar.zahlungen).forEach(function (v) { if (sales === paid(v, bar.rueckgeld, n(z.ec))) fixes.push({ kind: 'zahl', v: v }); });
+    swaps(bar.rueckgeld).forEach(function (v) { if (sales === paid(bar.zahlungen, v, n(z.ec))) fixes.push({ kind: 'rueck', v: v }); });
+    if (z.ec) swaps(z.ec).forEach(function (v) { if (sales === paid(bar.zahlungen, bar.rueckgeld, v)) fixes.push({ kind: 'ec', v: v }); });
+    if (fixes.length !== 1) return;
+    const f = fixes[0];
+    if (f.kind === 'item') {
+      const it = items[f.i], key = it.r === 19 ? 'u19' : it.r === 7 ? 'u7' : 'u0';
+      z[key] = n(z[key]) - it.brutto + f.v; z.korrigiert = key;
+    } else if (f.kind === 'ec') { z.ec = f.v; z.korrigiert = 'ec'; }
+    else {
+      const zahl = f.kind === 'zahl' ? f.v : bar.zahlungen, rueck = f.kind === 'rueck' ? f.v : bar.rueckgeld;
+      z.barLautBon = zahl - rueck; z.korrigiert = 'barLautBon';
+    }
   }
 
   // Bargeld aus Verkäufen = 19 % + 7 % + 0 % − EC/Karte − eingelöste Gutscheine
