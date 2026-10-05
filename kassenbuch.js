@@ -5,13 +5,14 @@
 
   // Felder eines Tagesabschlusses. sign +1 = Einnahme, −1 = wird abgezogen (Ausgabe-Spalte)
   const ZBON = [
-    { key: 'u19', label: 'Umsatz 19 %', text: 'Tagesabschluss Umsatz 19 %', sign: 1, satz: 19 },
-    { key: 'u7', label: 'Umsatz 7 %', text: 'Tagesabschluss Umsatz 7 %', sign: 1, satz: 7 },
+    { key: 'u19', label: 'Umsatz 19 %', text: 'Kassenabrechnung Umsatz 19 %', sign: 1, satz: 19 },
+    { key: 'u7', label: 'Umsatz 7 %', text: 'Kassenabrechnung Umsatz 7 %', sign: 1, satz: 7 },
     { key: 'u0', label: 'Gutscheinverkauf 0 %', text: 'Gutscheinverkauf 0 %', sign: 1, satz: 0 },
     { key: 'ec', label: 'EC-/Kartenzahlungen', text: 'EC-/Kartenzahlungen (unbar)', sign: -1 },
-    { key: 'gutschein', label: 'Gutscheine eingelöst', text: 'Gutscheine eingelöst', sign: -1 }
+    { key: 'gutschein', label: 'Gutscheine eingelöst', text: 'Gutscheine eingelöst', sign: -1 },
+    { key: 'aus', label: 'Auszahlungen / Ausgaben', text: 'Auszahlungen laut Kassenabrechnung', sign: -1, extra: true },
+    { key: 'ein', label: 'Einzahlungen / Einlagen', text: 'Einzahlungen laut Kassenabrechnung', sign: 1, extra: true }
   ];
-
   const TYP_ORDER = { zbon: 0, einnahme: 1, ausgabe: 2 };
 
   // Alte Einträge (vor dem Umbau) waren Einkaufsbelege → Ausgabe
@@ -32,7 +33,7 @@
       for (const f of ZBON) {
         const v = e[f.key] || 0;
         if (!v) continue;
-        if (f.sign > 0) out.push({ datum: e.datum, text: f.text, ein: v, aus: 0, satz: f.satz, ust: ust(v, f.satz) });
+        if (f.sign > 0) out.push({ datum: e.datum, text: f.text, ein: v, aus: 0, satz: f.extra ? null : f.satz, ust: f.extra ? 0 : ust(v, f.satz) });
         else out.push({ datum: e.datum, text: f.text, ein: 0, aus: v, satz: null, ust: 0 });
       }
       return out;

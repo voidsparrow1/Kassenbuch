@@ -1,4 +1,4 @@
-/* Kassenbuch – Tagesabschluss und Ausgabe-Belege fotografieren, Kassenbestand führen, als Excel teilen. */
+/* Kassenbuch – Kassenabrechnung fotografieren, Kassenbestand führen, als Excel teilen. */
 (function () {
   'use strict';
   const P = window.BonParser;
@@ -86,13 +86,15 @@
     b.type = 'button';
     let who, sub = '', amt;
     if (e.typ === 'zbon') {
-      who = 'Tagesabschluss';
+      who = 'Kassenabrechnung';
       const parts = [];
       if (e.u19) parts.push('19 %: ' + P.formatCents(e.u19));
       if (e.u7) parts.push('7 %: ' + P.formatCents(e.u7));
       if (e.u0) parts.push('Gutsch.: ' + P.formatCents(e.u0));
       if (e.ec) parts.push('EC: −' + P.formatCents(e.ec));
       if (e.gutschein) parts.push('eingel.: −' + P.formatCents(e.gutschein));
+      if (e.aus) parts.push('Ausz.: −' + P.formatCents(e.aus));
+      if (e.ein) parts.push('Einz.: ' + P.formatCents(e.ein));
       sub = parts.join(' · ');
       amt = '+' + eur(K.net(e));
     } else if (e.typ === 'einnahme') {
@@ -122,7 +124,7 @@
     list.innerHTML = '';
     if (!rows.length) {
       const empty = el('div', 'empty');
-      empty.append(el('b', '', 'Noch keine Einträge'), document.createTextNode('Abends den Tagesabschluss fotografieren, Einkaufsbelege unter „Ausgabe“.'));
+      empty.append(el('b', '', 'Noch keine Einträge'), document.createTextNode('Abends die Kassenabrechnung fotografieren. Ausgaben ohne Bon unter „Von Hand“.'));
       list.appendChild(empty);
     }
 
@@ -156,7 +158,7 @@
   // Feld-Definitionen je Eintragsart
   const FORMS = {
     zbon: {
-      title: { scan: 'Tagesabschluss prüfen', manual: 'Tagesabschluss eintragen', edit: 'Tagesabschluss bearbeiten' },
+      title: { scan: 'Kassenabrechnung prüfen', manual: 'Kassenabrechnung eintragen', edit: 'Kassenabrechnung bearbeiten' },
       fields: [{ key: 'datum', label: 'Datum', type: 'date' }].concat(K.ZBON.map((f) => ({
         key: f.key, label: f.label + (f.sign < 0 ? ' (wird abgezogen)' : ''), type: 'money'
       })))
@@ -223,21 +225,32 @@
       box.appendChild(wrap);
     }
     updateCalc();
+    // Erkannten Text zeigen (zum Prüfen oder zum Weiterschicken an den Entwickler)
+    const raw = $('rawBox');
+    raw.hidden = true;
+    $('rawBtn').hidden = !(opts.mode === 'scan' && opts.ocrText);
+    $('rawText').value = opts.ocrText || '';
     $('editor').hidden = false;
   }
 
-  // Live-Rechnung beim Tagesabschluss
+  // Live-Rechnung bei der Kassenabrechnung
   function updateCalc() {
     const calc = $('calc');
     if (!editing || editing.entry.typ !== 'zbon') { calc.hidden = true; return; }
     const z = {};
     for (const f of K.ZBON) z[f.key] = readMoney($('f_' + f.key).value) || 0;
     const bar = P.zbonBar(z);
+    const total = bar - (z.aus || 0) + (z.ein || 0);
     calc.hidden = false;
     calc.innerHTML = '';
     const line = el('div', 'calc-main');
-    line.append(el('span', '', 'Bar-Einnahme'), el('strong', bar < 0 ? 'neg' : '', eur(bar)));
+    line.append(el('span', '', 'Bar aus Verkäufen'), el('strong', bar < 0 ? 'neg' : '', eur(bar)));
     calc.append(line, el('div', 'calc-formula', '19 % + 7 % + Gutscheinverkauf − EC − eingelöste Gutscheine'));
+    if (z.aus || z.ein) {
+      const l2 = el('div', 'calc-main');
+      l2.append(el('span', '', 'Kasse gesamt'), el('strong', total < 0 ? 'neg' : '', (total >= 0 ? '+' : '') + eur(total)));
+      calc.append(l2, el('div', 'calc-formula', 'Bar aus Verkäufen − Auszahlungen + Einzahlungen'));
+    }
     const lb = editing.opts.barLautBon;
     if (lb) {
       const same = lb === bar;
@@ -358,29 +371,6 @@
     return c;
   }
 
-  // Graustufen + Kontrast strecken: hilft bei blassem Thermopapier
-  function enhance(canvas) {
-    const ctx = canvas.getContext('2d');
-    const d = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const px = d.data, hist = new Uint32Array(256);
-    for (let i = 0; i < px.length; i += 4) {
-      const g = (px[i] * 299 + px[i + 1] * 587 + px[i + 2] * 114) / 1000 | 0;
-      px[i] = g; hist[g]++;
-    }
-    const n = px.length / 4;
-    let lo = 0, hi = 255, acc = 0;
-    while (lo < 255 && (acc += hist[lo]) < n * 0.02) lo++;
-    acc = 0;
-    while (hi > 0 && (acc += hist[hi]) < n * 0.10) hi--;
-    const span = Math.max(1, hi - lo);
-    for (let i = 0; i < px.length; i += 4) {
-      const v = Math.max(0, Math.min(255, (px[i] - lo) * 255 / span));
-      px[i] = px[i + 1] = px[i + 2] = v;
-    }
-    ctx.putImageData(d, 0, 0);
-    return canvas;
-  }
-
   function scanQr(canvas) {
     if (!window.jsQR) return null;
     try {
@@ -394,7 +384,7 @@
     if (!file) return;
     const img = await loadImg(file);
     $('busyImg').src = img.src;
-    $('busyText').textContent = typ === 'zbon' ? 'Tagesabschluss wird gelesen …' : 'Beleg wird gelesen …';
+    $('busyText').textContent = typ === 'zbon' ? 'Kassenabrechnung wird gelesen …' : 'Beleg wird gelesen …';
     setBar('busyBar', 0.03);
     $('busy').hidden = false;
 
@@ -405,7 +395,7 @@
       if (typ === 'ausgabe') qr = scanQr(drawScaled(img, 2000));
       setBar('busyBar', 0.08);
       const worker = await getWorker();
-      const { data } = await worker.recognize(enhance(drawScaled(img, 1800)));
+      const { data } = await worker.recognize(window.BonBild.prepare(img));
       text = data.text || '';
     } catch (e) {
       console.error(e);
@@ -420,7 +410,7 @@
     let entry, extra = {};
     if (typ === 'zbon') {
       const z = P.parseZBon(text);
-      entry = { typ: 'zbon', datum: z.datum, u19: z.u19, u7: z.u7, u0: z.u0, ec: z.ec, gutschein: z.gutschein };
+      entry = { typ: 'zbon', datum: z.datum, u19: z.u19, u7: z.u7, u0: z.u0, ec: z.ec, gutschein: z.gutschein, aus: z.aus, ein: z.ein };
       extra.barLautBon = z.barLautBon;
       if (!failed && !z.u19 && !z.u7 && !z.u0) flagged.u19 = 'Umsätze nicht erkannt – bitte vom Bon abtippen';
     } else {
@@ -430,7 +420,7 @@
       if (!failed && !r.haendler) flagged.text = 'Nicht erkannt';
     }
     if (!entry.datum) { entry.datum = todayIso(); if (!failed) flagged.datum = 'Nicht erkannt – heute eingesetzt, bitte prüfen'; }
-    openEditor(entry, Object.assign({ mode: 'scan', flagged: flagged }, extra));
+    openEditor(entry, Object.assign({ mode: 'scan', flagged: flagged, ocrText: text }, extra));
   }
 
   // ---------- Excel ----------
@@ -494,26 +484,25 @@
     };
   }
 
-  let galleryTyp = 'ausgabe';
   function wire() {
     const pick = (typ) => (ev) => { const f = ev.target.files[0]; ev.target.value = ''; processFile(f, typ); };
     $('camZbon').addEventListener('change', pick('zbon'));
-    $('camAusgabe').addEventListener('change', pick('ausgabe'));
-    $('galleryInput').addEventListener('change', (ev) => pick(galleryTyp)(ev));
+    $('galleryInput').addEventListener('change', pick('zbon'));
     // Ohne Anfangsbestand erst diesen abfragen
     document.querySelector('label[for=camZbon]').addEventListener('click', needStart(() => {}));
-    document.querySelector('label[for=camAusgabe]').addEventListener('click', needStart(() => {}));
-
-    $('galleryBtn').addEventListener('click', needStart(() => choose('Foto aus der Galerie', 'Was ist auf dem Foto?', [
-      { label: 'Tagesabschluss (Z-Bon)', run: () => { galleryTyp = 'zbon'; $('galleryInput').click(); } },
-      { label: 'Ausgabe-Beleg', run: () => { galleryTyp = 'ausgabe'; $('galleryInput').click(); } }
-    ])));
+    $('galleryBtn').addEventListener('click', needStart(() => $('galleryInput').click()));
     $('manualBtn').addEventListener('click', needStart(() => choose('Von Hand eintragen', '', [
-      { label: 'Tagesabschluss', sub: 'Umsätze, EC, Gutscheine vom Z-Bon', run: () => openEditor({ typ: 'zbon', datum: todayIso() }, { mode: 'manual' }) },
-      { label: 'Ausgabe', sub: 'Einkauf, Bankeinzahlung, Entnahme …', run: () => openEditor({ typ: 'ausgabe', datum: todayIso() }, { mode: 'manual' }) },
+      { label: 'Kassenabrechnung', sub: 'Umsätze, EC, Gutscheine vom Bon abtippen', run: () => openEditor({ typ: 'zbon', datum: todayIso() }, { mode: 'manual' }) },
+      { label: 'Ausgabe', sub: 'Einkauf, Bankeinzahlung, Entnahme ohne Bon …', run: () => openEditor({ typ: 'ausgabe', datum: todayIso() }, { mode: 'manual' }) },
       { label: 'Sonstige Einnahme', sub: 'Privateinlage, Wechselgeld von der Bank …', run: () => openEditor({ typ: 'einnahme', datum: todayIso() }, { mode: 'manual' }) }
     ])));
     $('exportBtn').addEventListener('click', exportMenu);
+    $('rawBtn').addEventListener('click', () => { $('rawBox').hidden = !$('rawBox').hidden; });
+    $('rawCopy').addEventListener('click', async () => {
+      const t = $('rawText').value;
+      try { await navigator.clipboard.writeText(t); toast('Text kopiert'); }
+      catch (e) { $('rawText').select(); toast('Text markiert – jetzt kopieren'); }
+    });
     $('bestandBtn').addEventListener('click', openStart);
     $('choiceCancel').addEventListener('click', () => { $('choice').hidden = true; });
     $('form').addEventListener('submit', onSubmit);

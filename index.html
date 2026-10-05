@@ -26,23 +26,16 @@
   <main id="list" class="list" aria-live="polite"></main>
 
   <footer class="actions">
-    <div class="row">
-      <label class="btn primary" for="camZbon">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
-        <span><b>Tagesabschluss</b><small>Z-Bon scannen</small></span>
-      </label>
-      <label class="btn primary alt" for="camAusgabe">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
-        <span><b>Ausgabe</b><small>Beleg scannen</small></span>
-      </label>
-    </div>
+    <label class="btn primary" for="camZbon">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><circle cx="12" cy="13" r="3.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+      <span><b>Kassenabrechnung scannen</b><small>Bon fotografieren</small></span>
+    </label>
     <div class="row">
       <button class="btn ghost" id="galleryBtn" type="button">Galerie</button>
       <button class="btn ghost" id="manualBtn" type="button">Von Hand</button>
       <button class="btn ghost strong" id="exportBtn" type="button">Excel</button>
     </div>
     <input id="camZbon" type="file" accept="image/*" capture="environment" hidden>
-    <input id="camAusgabe" type="file" accept="image/*" capture="environment" hidden>
     <input id="galleryInput" type="file" accept="image/*" hidden>
   </footer>
 
@@ -87,12 +80,18 @@
         <button type="submit" class="btn primary">Speichern</button>
       </div>
       <button type="button" class="link danger" id="deleteBtn" hidden>Eintrag löschen</button>
+      <button type="button" class="link muted" id="rawBtn" hidden>Erkannten Text anzeigen</button>
+      <div id="rawBox" class="raw" hidden>
+        <textarea id="rawText" readonly rows="10"></textarea>
+        <button type="button" class="btn ghost full" id="rawCopy">Text kopieren</button>
+      </div>
     </form>
   </section>
 
   <div id="toast" class="toast" role="status" hidden></div>
 
   <script src="parser.js"></script>
+  <script src="bild.js"></script>
   <script src="kassenbuch.js"></script>
   <script src="xlsx.js"></script>
   <script src="app.js"></script>

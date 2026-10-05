@@ -252,21 +252,29 @@
   }
 
   function parseZBon(text) {
-    const lines = String(text || '').split(/\r?\n/).map(function (l) { return l.trim(); }).filter(Boolean);
+    const lines = String(text || '').split(/\r?\n/).map(function (l) {
+      return l.trim()
+        .replace(/(\d[.,]\d{2})\d(?=\s|$)/g, '$1')   // Störzeichen am Bonrand: "250,508" → "250,50"
+        .replace(/[©®]/g, '0');                       // "712,2©" → "712,20"
+    }).filter(Boolean);
     let u0 = rateGross(lines, 0);
-    if (u0 === null) u0 = findLine(lines, /gutschein\w*\s*(?:verk|ausgabe|aufladung)|verk\w*\s*gutschein/i);
+    if (u0 === null) u0 = findLine(lines, /gutschein\w*[\s\-:]*(?:verk|ausgabe|aufladung)|verk\w*[\s\-:]*gutschein/i);
     return {
       datum: findDate(text || ''),
       u19: rateGross(lines, 19),
       u7: rateGross(lines, 7),
       u0: u0,
       ec: cardTotal(lines),
-      gutschein: findLine(lines, /gutschein\w*\s*(?:einl|eingel|zahl|bezahl)|einl\w*\s*gutschein|zahl\w*\s*gutschein/i),
-      barLautBon: findLine(lines, /(^|\s)bar(\s|:|$)|barzahlung|bargeld/i, /unbar|gegeben|zur[üu]ck|r[üu]ckgeld|wechsel|einlage|entnahme/i)
+      gutschein: findLine(lines, /gutschein\w*[\s\-:]*(?:einl|eingel|zahl|bezahl|annahme)|einl\w*[\s\-:]*gutschein|zahl\w*[\s\-:]*gutschein/i),
+      barLautBon: findLine(lines, /(^|\s)bar(\s|:|$)|barzahlung|bargeld/i, /unbar|gegeben|zur[üu]ck|r[üu]ckgeld|wechsel|einlage|entnahme|auszahl|einzahl|bestand|soll/i),
+      // Bargeld, das ohne Verkauf aus der Kasse genommen bzw. hineingelegt wurde
+      aus: findLine(lines, /aus[\s\-]?zahlung|ausgabe|entnahme|paid\s*out/i, /gutschein|r[üu]ckgeld|wechselgeld/i),
+      ein: findLine(lines, /ein[\s\-]?zahlung|einlage|paid\s*in/i, /gutschein/i)
     };
   }
 
-  // Bar-Einnahme = 19 % + 7 % + 0 % − EC/Karte − eingelöste Gutscheine
+  // Bargeld aus Verkäufen = 19 % + 7 % + 0 % − EC/Karte − eingelöste Gutscheine
+  // (entspricht „Bar“ unter den Zahlungsarten auf dem Bon)
   function zbonBar(z) {
     const n = function (v) { return v || 0; };
     return n(z.u19) + n(z.u7) + n(z.u0) - n(z.ec) - n(z.gutschein);
