@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Kassenbuch</title>
+  <meta name="theme-color" content="#f4efe6">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Kassenbuch">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header class="top">
+    <h1>Kassenbuch</h1>
+    <div class="month">
+      <span id="monthLabel">Diesen Monat</span>
+      <strong id="monthSum">0,00 €</strong>
+    </div>
+  </header>
+
+  <main id="list" class="list" aria-live="polite"></main>
+
+  <footer class="actions">
+    <label class="btn primary" for="camInput">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><circle cx="12" cy="13" r="3.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+      Kassenzettel fotografieren
+    </label>
+    <div class="row">
+      <label class="btn ghost" for="galleryInput">Galerie</label>
+      <button class="btn ghost" id="manualBtn" type="button">Von Hand</button>
+      <button class="btn ghost strong" id="exportBtn" type="button">Excel teilen</button>
+    </div>
+    <input id="camInput" type="file" accept="image/*" capture="environment" hidden>
+    <input id="galleryInput" type="file" accept="image/*" hidden>
+  </footer>
+
+  <!-- Erster Start -->
+  <section id="setup" class="overlay" hidden>
+    <div class="card center">
+      <h2>Einrichtung</h2>
+      <p id="setupText">Die Texterkennung wird einmalig auf dieses Gerät geladen. Danach funktioniert alles ohne Internet.</p>
+      <div class="bar"><div id="setupBar"></div></div>
+    </div>
+  </section>
+
+  <!-- Bon wird gelesen -->
+  <section id="busy" class="overlay" hidden>
+    <div class="card center">
+      <img id="busyImg" alt="" class="thumb">
+      <h2 id="busyText">Kassenzettel wird gelesen …</h2>
+      <div class="bar"><div id="busyBar"></div></div>
+      <p class="hint">Das dauert ein paar Sekunden.</p>
+    </div>
+  </section>
+
+  <!-- Prüfen und speichern -->
+  <section id="editor" class="overlay sheet" hidden>
+    <form id="form" class="card" novalidate>
+      <h2 id="editorTitle">Bitte kurz prüfen</h2>
+      <p id="editorHint" class="hint"></p>
+      <div id="fields"></div>
+      <div class="row">
+        <button type="button" class="btn ghost" id="cancelBtn">Abbrechen</button>
+        <button type="submit" class="btn primary">Speichern</button>
+      </div>
+      <button type="button" class="link danger" id="deleteBtn" hidden>Eintrag löschen</button>
+    </form>
+  </section>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+
+  <script src="parser.js"></script>
+  <script src="xlsx.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
