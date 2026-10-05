@@ -98,18 +98,29 @@
     return null;
   }
 
-  function findDate(text) {
-    const today = new Date();
+  // Nur Daten aus den letzten 2 Jahren bis heute gelten als plausibel.
+  // Von mehreren plausiblen Daten gewinnt das neueste (Kaufdatum steht meist unten,
+  // ältere Zahlenfolgen wie Artikel- oder Filialnummern werden so verworfen).
+  function findDate(text, now) {
+    const today = now || new Date();
     const todayIso = today.getFullYear() + '-' + pad(today.getMonth() + 1) + '-' + pad(today.getDate());
+    const minIso = (today.getFullYear() - 2) + '-' + pad(today.getMonth() + 1) + '-' + pad(today.getDate());
+    const ok = function (d) { return d && d >= minIso && d <= todayIso; };
+    const found = [];
     const re = /(?:^|[^\d])(\d{1,2})\s?[.\/-]\s?(\d{1,2})\s?[.\/-]\s?(\d{4}|\d{2})(?!\d)/g;
     let m;
     while ((m = re.exec(text))) {
       const d = isoDate(parseInt(m[3], 10), parseInt(m[2], 10), parseInt(m[1], 10));
-      if (d && d <= todayIso) return d;
+      if (ok(d)) found.push(d);
+      re.lastIndex = m.index + 1; // überlappende Treffer zulassen
     }
-    const iso = text.match(/(20\d{2})-(\d{2})-(\d{2})/);
-    if (iso) return isoDate(+iso[1], +iso[2], +iso[3]);
-    return null;
+    const isoRe = /(20\d{2})-(\d{2})-(\d{2})/g;
+    while ((m = isoRe.exec(text))) {
+      const d = isoDate(+m[1], +m[2], +m[3]);
+      if (ok(d)) found.push(d);
+    }
+    if (!found.length) return null;
+    return found.sort().pop();
   }
 
   // Schlüsselwörter für die Endsumme, nach Verlässlichkeit sortiert
@@ -170,6 +181,97 @@
     };
   }
 
+  // ---------- Tagesabschluss (Z-Bon) der eigenen Kasse ----------
+  const RATE_RE = {
+    19: /(^|[^\d.,])19\s?(?:[.,]0{1,2})?\s?%/,
+    7: /(^|[^\d.,])7\s?(?:[.,]0{1,2})?\s?%/,
+    0: /(^|[^\d.,])0\s?(?:[.,]0{1,2})?\s?%/
+  };
+  const anyRate = function (l) { return RATE_RE[19].test(l) || RATE_RE[7].test(l) || RATE_RE[0].test(l); };
+  // Prozentangaben ("19,00%") sind keine Beträge
+  const pos = function (l) {
+    return amountsIn(l.replace(/\d{1,3}\s?(?:[.,]\d{1,2})?\s?%/g, ' ')).filter(function (c) { return c > 0; });
+  };
+  const lastAmt = function (l) { const a = pos(l); return a.length ? a[a.length - 1] : null; };
+
+  // Bruttoumsatz eines Steuersatzes. Kommt in drei Formen vor:
+  //  "Umsatz 19% 238,00" | "19% Netto 84,03 MwSt 15,97 Brutto 100,00" | Block mit Netto/MwSt/Brutto-Zeilen
+  function rateGross(lines, rate) {
+    const re = RATE_RE[rate];
+    let best = null;
+    for (let i = 0; i < lines.length; i++) {
+      if (!re.test(lines[i])) continue;
+      if (rate === 0 && /gutschein/i.test(lines[i]) && /einl|eingel/i.test(lines[i])) continue;
+      const l = lines[i].toLowerCase();
+      const a = pos(lines[i]);
+      let val = null, score = -9;
+      if (a.length >= 2) { val = Math.max.apply(null, a); score = 2; }
+      else if (a.length === 1) {
+        val = a[0];
+        score = /brutto|umsatz|summe|gesamt|verkauf/.test(l) ? 3 : /mwst|ust|steuer|netto/.test(l) ? -2 : 1;
+      }
+      // Block-Format: Steuersatz steht allein, Brutto folgt in einer der nächsten Zeilen
+      for (let j = i + 1; a.length === 0 && j <= i + 4 && j < lines.length; j++) {
+        if (anyRate(lines[j]) || /summe|gesamt|total/i.test(lines[j])) break;
+        if (/brutto|umsatz/i.test(lines[j])) {
+          const v = lastAmt(lines[j]);
+          if (v !== null && score < 4) { val = v; score = 4; }
+          break;
+        }
+      }
+      if (val !== null && (!best || score > best.score || (score === best.score && val > best.val))) best = { val: val, score: score };
+    }
+    return best && best.score >= 0 ? best.val : null;
+  }
+
+  const CARD_RE = /\bec\b|ec[-\s]?karte|girocard|kartenzahlung|karte|maestro|visa|master\s?card|amex|american\s?express|kredit|v\s?pay|kontaktlos|sumup|zettle/i;
+  const IGNORE_RE = /storno|retoure|anzahl|trinkgeld/i;
+
+  function cardTotal(lines) {
+    let unbar = null, gesamt = null, sum = 0, found = false;
+    for (const l of lines) {
+      if (IGNORE_RE.test(l) || /gutschein/i.test(l)) continue;
+      const v = lastAmt(l);
+      if (v === null) continue;
+      if (/unbar/i.test(l)) { if (unbar === null) unbar = v; continue; }
+      if (CARD_RE.test(l)) {
+        if (/gesamt|summe|total/i.test(l)) { if (gesamt === null) gesamt = v; }
+        else { sum += v; found = true; }
+      }
+    }
+    return unbar !== null ? unbar : gesamt !== null ? gesamt : found ? sum : null;
+  }
+
+  function findLine(lines, re, exclude) {
+    for (const l of lines) {
+      if (!re.test(l) || (exclude && exclude.test(l))) continue;
+      const v = lastAmt(l);
+      if (v !== null) return v;
+    }
+    return null;
+  }
+
+  function parseZBon(text) {
+    const lines = String(text || '').split(/\r?\n/).map(function (l) { return l.trim(); }).filter(Boolean);
+    let u0 = rateGross(lines, 0);
+    if (u0 === null) u0 = findLine(lines, /gutschein\w*\s*(?:verk|ausgabe|aufladung)|verk\w*\s*gutschein/i);
+    return {
+      datum: findDate(text || ''),
+      u19: rateGross(lines, 19),
+      u7: rateGross(lines, 7),
+      u0: u0,
+      ec: cardTotal(lines),
+      gutschein: findLine(lines, /gutschein\w*\s*(?:einl|eingel|zahl|bezahl)|einl\w*\s*gutschein|zahl\w*\s*gutschein/i),
+      barLautBon: findLine(lines, /(^|\s)bar(\s|:|$)|barzahlung|bargeld/i, /unbar|gegeben|zur[üu]ck|r[üu]ckgeld|wechsel|einlage|entnahme/i)
+    };
+  }
+
+  // Bar-Einnahme = 19 % + 7 % + 0 % − EC/Karte − eingelöste Gutscheine
+  function zbonBar(z) {
+    const n = function (v) { return v || 0; };
+    return n(z.u19) + n(z.u7) + n(z.u0) - n(z.ec) - n(z.gutschein);
+  }
+
   function formatCents(c) {
     if (c === null || c === undefined) return '';
     const neg = c < 0; c = Math.abs(c);
@@ -177,7 +279,7 @@
     return (neg ? '-' : '') + e + ',' + pad(c % 100);
   }
 
-  const api = { parseTseQr: parseTseQr, parseOcrText: parseOcrText, combine: combine, toCents: toCents, formatCents: formatCents };
+  const api = { parseTseQr: parseTseQr, parseOcrText: parseOcrText, parseZBon: parseZBon, zbonBar: zbonBar, combine: combine, toCents: toCents, formatCents: formatCents };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.BonParser = api;
 })(this);

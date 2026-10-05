@@ -1,11 +1,11 @@
 /* Service Worker: macht die App offline-fähig.
    Beim ersten Start (mit Internet) werden App und Texterkennung einmalig gespeichert. */
-const SHELL_CACHE = 'kassenbon-shell-v1';      // bei App-Änderungen hochzählen
+const SHELL_CACHE = 'kassenbon-shell-v5';      // bei App-Änderungen hochzählen
 const VENDOR_CACHE = 'kassenbon-vendor-tess510'; // nur bei neuer Tesseract-Version ändern
 
 const SHELL = [
-  './', 'index.html', 'app.css', 'app.js', 'parser.js', 'xlsx.js', 'manifest.webmanifest',
-  'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'
+  './', 'index.html', 'app.css', 'app.js', 'parser.js', 'kassenbuch.js', 'xlsx.js', 'manifest.webmanifest',
+  'icon-192.png', 'icon-512.png', 'apple-touch-icon.png'
 ];
 
 const CDN = 'https://cdn.jsdelivr.net/npm/';

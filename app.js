@@ -1,16 +1,9 @@
-/* Kassenbuch – Kassenzettel fotografieren, auslesen, als Excel teilen. */
+/* Kassenbuch – Tagesabschluss und Ausgabe-Belege fotografieren, Kassenbestand führen, als Excel teilen. */
 (function () {
   'use strict';
   const P = window.BonParser;
+  const K = window.Kassenbuch;
   const $ = (id) => document.getElementById(id);
-
-  // ---------- Felder (hier später erweitern, z. B. MwSt, Kategorie) ----------
-  const FIELDS = [
-    { key: 'datum', title: 'Datum', type: 'date', width: 12 },
-    { key: 'haendler', title: 'Händler', type: 'text', width: 30 },
-    { key: 'betrag', title: 'Betrag', type: 'money', width: 13 }
-  ];
-  const REQUIRED = ['datum', 'betrag'];
 
   const USE_SW = 'serviceWorker' in navigator && !/[?&]nosw\b/.test(location.search);
   const abs = (p) => new URL(p, location.href).href;
@@ -19,30 +12,37 @@
   let dbP = null;
   function db() {
     if (!dbP) dbP = new Promise((res, rej) => {
-      const r = indexedDB.open('kassenbuch', 1);
-      r.onupgradeneeded = () => r.result.createObjectStore('eintraege', { keyPath: 'id', autoIncrement: true });
+      const r = indexedDB.open('kassenbuch', 2);
+      r.onupgradeneeded = () => {
+        const d = r.result;
+        if (!d.objectStoreNames.contains('eintraege')) d.createObjectStore('eintraege', { keyPath: 'id', autoIncrement: true });
+        if (!d.objectStoreNames.contains('einstellungen')) d.createObjectStore('einstellungen', { keyPath: 'key' });
+      };
       r.onsuccess = () => res(r.result);
       r.onerror = () => rej(r.error);
     });
     return dbP;
   }
-  async function tx(mode, fn) {
+  async function tx(store, mode, fn) {
     const d = await db();
     return new Promise((res, rej) => {
-      const t = d.transaction('eintraege', mode);
-      const req = fn(t.objectStore('eintraege'));
+      const t = d.transaction(store, mode);
+      const req = fn(t.objectStore(store));
       t.oncomplete = () => res(req && req.result);
       t.onerror = () => rej(t.error);
     });
   }
-  const allEntries = () => tx('readonly', (s) => s.getAll());
-  const saveEntry = (e) => tx('readwrite', (s) => s.put(e));
-  const deleteEntry = (id) => tx('readwrite', (s) => s.delete(id));
+  const allEntries = () => tx('eintraege', 'readonly', (s) => s.getAll());
+  const saveEntry = (e) => tx('eintraege', 'readwrite', (s) => s.put(e));
+  const deleteEntry = (id) => tx('eintraege', 'readwrite', (s) => s.delete(id));
+  const getSetting = async (key) => { const r = await tx('einstellungen', 'readonly', (s) => s.get(key)); return r ? r.value : null; };
+  const setSetting = (key, value) => tx('einstellungen', 'readwrite', (s) => s.put({ key: key, value: value }));
 
   // ---------- Hilfen ----------
-  const MONTHS = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'];
+  const WD = ['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'];
   const eur = (c) => P.formatCents(c || 0) + ' €';
   const deDate = (iso) => iso ? iso.split('-').reverse().join('.') : '';
+  const dayLabel = (iso) => { const d = new Date(iso + 'T12:00:00'); return isNaN(d) ? 'Ohne Datum' : WD[d.getDay()] + ', ' + deDate(iso); };
   const todayIso = () => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
 
   function toast(msg, ms) {
@@ -52,6 +52,7 @@
     toast.h = setTimeout(() => { t.hidden = true; }, ms || 2600);
   }
   function setBar(id, frac) { $(id).style.width = Math.round(Math.max(0, Math.min(1, frac)) * 100) + '%'; }
+  function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
 
   function loadScript(src) {
     return new Promise((res, rej) => {
@@ -61,87 +62,6 @@
     });
   }
 
-  // ---------- Liste ----------
-  async function render() {
-    const entries = (await allEntries()).sort((a, b) => (b.datum || '').localeCompare(a.datum || '') || b.id - a.id);
-    const list = $('list');
-    const now = todayIso().slice(0, 7);
-    const monthSum = entries.filter((e) => (e.datum || '').startsWith(now)).reduce((a, e) => a + (e.betrag || 0), 0);
-    $('monthLabel').textContent = MONTHS[new Date().getMonth()];
-    $('monthSum').textContent = eur(monthSum);
-
-    if (!entries.length) {
-      list.innerHTML = '<div class="empty"><b>Noch keine Einträge</b>Tippe unten auf „Kassenzettel fotografieren“.</div>';
-      return;
-    }
-    const groups = {};
-    for (const e of entries) (groups[(e.datum || '????-??').slice(0, 7)] ||= []).push(e);
-
-    list.innerHTML = '';
-    for (const key of Object.keys(groups)) {
-      const items = groups[key];
-      const [y, m] = key.split('-');
-      const head = document.createElement('div');
-      head.className = 'group';
-      head.innerHTML = '<span></span><span></span>';
-      head.children[0].textContent = (MONTHS[+m - 1] || 'Ohne Datum') + (y && y !== '????' ? ' ' + y : '');
-      head.children[1].textContent = eur(items.reduce((a, e) => a + (e.betrag || 0), 0));
-      list.appendChild(head);
-      for (const e of items) {
-        const b = document.createElement('button');
-        b.type = 'button';
-        b.className = 'entry';
-        b.innerHTML = '<span class="who"></span><span class="amt"></span><span class="when"></span>';
-        b.querySelector('.who').textContent = e.haendler || 'Ohne Händler';
-        b.querySelector('.amt').textContent = eur(e.betrag);
-        b.querySelector('.when').textContent = deDate(e.datum);
-        b.addEventListener('click', () => openEditor(e, { existing: true }));
-        list.appendChild(b);
-      }
-    }
-  }
-
-  // ---------- Bearbeiten / Prüfen ----------
-  let editing = null;
-
-  function openEditor(entry, opts) {
-    opts = opts || {};
-    editing = Object.assign({}, entry);
-    $('editorTitle').textContent = opts.existing ? 'Eintrag bearbeiten' : opts.manual ? 'Neuer Eintrag' : 'Bitte kurz prüfen';
-    const missing = opts.existing || opts.manual ? [] : FIELDS.filter((f) => !entry[f.key]).map((f) => f.key);
-    $('editorHint').textContent = opts.existing || opts.manual ? '' :
-      missing.length ? 'Orange markierte Felder bitte ergänzen.' :
-      opts.quelle === 'qr' ? 'Betrag und Datum stammen aus dem QR-Code des Bons.' : 'Stimmt alles? Dann einfach speichern.';
-    $('deleteBtn').hidden = !opts.existing;
-
-    const box = $('fields');
-    box.innerHTML = '';
-    for (const f of FIELDS) {
-      const wrap = document.createElement('div');
-      wrap.className = 'field' + (missing.includes(f.key) ? ' missing' : '');
-      const id = 'f_' + f.key;
-      const label = document.createElement('label');
-      label.htmlFor = id; label.textContent = f.title + (f.type === 'money' ? ' (€)' : '');
-      const input = document.createElement('input');
-      input.id = id; input.name = f.key;
-      if (f.type === 'date') { input.type = 'date'; input.value = entry[f.key] || ''; }
-      else if (f.type === 'money') {
-        input.type = 'text'; input.inputMode = 'decimal'; input.className = 'money';
-        input.placeholder = '0,00'; input.value = entry[f.key] ? P.formatCents(entry[f.key]) : '';
-      } else { input.type = 'text'; input.autocapitalize = 'words'; input.value = entry[f.key] || ''; }
-      input.addEventListener('input', () => wrap.classList.remove('missing'));
-      wrap.append(label, input);
-      if (missing.includes(f.key)) {
-        const n = document.createElement('div'); n.className = 'note'; n.textContent = 'Nicht erkannt';
-        wrap.appendChild(n);
-      }
-      box.appendChild(wrap);
-    }
-    $('editor').hidden = false;
-  }
-
-  function closeEditor() { $('editor').hidden = true; editing = null; }
-
   function readMoney(v) {
     v = String(v || '').trim().replace(/\s|€/g, '');
     if (!v) return null;
@@ -150,31 +70,245 @@
     return P.toCents(v);
   }
 
-  async function onSubmit(ev) {
-    ev.preventDefault();
-    const out = Object.assign({}, editing);
-    let ok = true;
-    for (const f of FIELDS) {
-      const input = $('f_' + f.key);
-      let v = input.value.trim();
-      if (f.type === 'money') { v = readMoney(v); if (v === null && input.value.trim()) { mark(input, 'Bitte als Betrag eingeben, z. B. 12,50'); ok = false; continue; } }
-      if (REQUIRED.includes(f.key) && (v === null || v === '')) { mark(input, 'Bitte ausfüllen'); ok = false; continue; }
-      out[f.key] = v === '' ? null : v;
-    }
-    if (!ok) return;
-    if (!out.erstellt) out.erstellt = new Date().toISOString();
-    await saveEntry(out);
-    closeEditor();
-    await render();
-    toast('Gespeichert');
+  // ---------- Zustand ----------
+  let ENTRIES = [];
+  let START = null; // { datum, betrag } – Kassenbestand vor dem ersten Eintrag
+
+  async function reload() {
+    ENTRIES = (await allEntries()).map(K.normalize);
+    START = await getSetting('anfangsbestand');
+    render();
   }
+
+  // ---------- Liste ----------
+  function entryCard(e) {
+    const b = el('button', 'entry ' + e.typ);
+    b.type = 'button';
+    let who, sub = '', amt;
+    if (e.typ === 'zbon') {
+      who = 'Tagesabschluss';
+      const parts = [];
+      if (e.u19) parts.push('19 %: ' + P.formatCents(e.u19));
+      if (e.u7) parts.push('7 %: ' + P.formatCents(e.u7));
+      if (e.u0) parts.push('Gutsch.: ' + P.formatCents(e.u0));
+      if (e.ec) parts.push('EC: −' + P.formatCents(e.ec));
+      if (e.gutschein) parts.push('eingel.: −' + P.formatCents(e.gutschein));
+      sub = parts.join(' · ');
+      amt = '+' + eur(K.net(e));
+    } else if (e.typ === 'einnahme') {
+      who = e.text || 'Einnahme'; sub = 'Einnahme'; amt = '+' + eur(e.betrag);
+    } else {
+      who = e.text || 'Ausgabe'; sub = 'Ausgabe'; amt = '−' + eur(e.betrag);
+    }
+    b.append(el('span', 'who', who), el('span', 'amt', amt), el('span', 'when', sub));
+    b.addEventListener('click', () => openEditor(e, { mode: 'edit' }));
+    return b;
+  }
+
+  function render() {
+    const rows = K.withBalance(ENTRIES, START);
+    const end = rows.length ? rows[rows.length - 1].bestand : (START ? START.betrag : 0);
+    const best = $('bestand');
+    best.textContent = START ? eur(end) : 'festlegen';
+    best.classList.toggle('neg', !!START && end < 0);
+
+    const negDay = rows.find((r) => r.bestand < 0);
+    const warn = $('warn');
+    if (!START) { warn.hidden = false; warn.textContent = 'Bitte zuerst oben den Kassenbestand zu Beginn eintragen.'; }
+    else if (negDay) { warn.hidden = false; warn.textContent = '⚠ Kassenbestand wird am ' + deDate(negDay.e.datum) + ' negativ. Bitte Einträge prüfen.'; }
+    else warn.hidden = true;
+
+    const list = $('list');
+    list.innerHTML = '';
+    if (!rows.length) {
+      const empty = el('div', 'empty');
+      empty.append(el('b', '', 'Noch keine Einträge'), document.createTextNode('Abends den Tagesabschluss fotografieren, Einkaufsbelege unter „Ausgabe“.'));
+      list.appendChild(empty);
+    }
+
+    // Tage, neueste zuerst
+    const days = [];
+    for (const r of rows) {
+      const k = r.e.datum || '';
+      if (!days.length || days[days.length - 1].key !== k) days.push({ key: k, items: [], bestand: 0 });
+      const d = days[days.length - 1];
+      d.items.push(r.e); d.bestand = r.bestand;
+    }
+    days.reverse();
+    for (const d of days) {
+      const head = el('div', 'group' + (d.bestand < 0 ? ' neg' : ''));
+      head.append(el('span', '', dayLabel(d.key)), el('span', '', 'Bestand ' + eur(d.bestand)));
+      list.appendChild(head);
+      for (const e of d.items) list.appendChild(entryCard(e));
+    }
+    if (START) {
+      const head = el('div', 'group');
+      head.append(el('span', '', dayLabel(START.datum)), el('span', '', ''));
+      const b = el('button', 'entry start');
+      b.type = 'button';
+      b.append(el('span', 'who', 'Kassenbestand zu Beginn'), el('span', 'amt', eur(START.betrag)), el('span', 'when', 'Anfangsbestand'));
+      b.addEventListener('click', openStart);
+      list.append(head, b);
+    }
+  }
+
+  // ---------- Formulare ----------
+  // Feld-Definitionen je Eintragsart
+  const FORMS = {
+    zbon: {
+      title: { scan: 'Tagesabschluss prüfen', manual: 'Tagesabschluss eintragen', edit: 'Tagesabschluss bearbeiten' },
+      fields: [{ key: 'datum', label: 'Datum', type: 'date' }].concat(K.ZBON.map((f) => ({
+        key: f.key, label: f.label + (f.sign < 0 ? ' (wird abgezogen)' : ''), type: 'money'
+      })))
+    },
+    ausgabe: {
+      title: { scan: 'Ausgabe prüfen', manual: 'Ausgabe eintragen', edit: 'Ausgabe bearbeiten' },
+      fields: [
+        { key: 'datum', label: 'Datum', type: 'date' },
+        { key: 'text', label: 'Wofür / bei wem', type: 'text', placeholder: 'z. B. Metro, Bankeinzahlung' },
+        { key: 'betrag', label: 'Betrag', type: 'money', required: true }
+      ]
+    },
+    einnahme: {
+      title: { manual: 'Sonstige Einnahme', edit: 'Einnahme bearbeiten' },
+      fields: [
+        { key: 'datum', label: 'Datum', type: 'date' },
+        { key: 'text', label: 'Wofür', type: 'text', placeholder: 'z. B. Privateinlage, Wechselgeld' },
+        { key: 'betrag', label: 'Betrag', type: 'money', required: true }
+      ]
+    },
+    start: {
+      title: { edit: 'Kassenbestand zu Beginn' },
+      fields: [
+        { key: 'datum', label: 'Stand vom', type: 'date' },
+        { key: 'betrag', label: 'Bargeld in der Kasse', type: 'money', allowZero: true }
+      ]
+    }
+  };
+
+  let editing = null; // { entry, opts }
+
+  function openEditor(entry, opts) {
+    opts = opts || {};
+    const form = FORMS[entry.typ];
+    editing = { entry: Object.assign({}, entry), opts: opts };
+    $('editorTitle').textContent = form.title[opts.mode] || form.title.edit;
+    $('deleteBtn').hidden = opts.mode !== 'edit' || entry.typ === 'start';
+
+    const flagged = opts.flagged || {};
+    let hint = '';
+    if (entry.typ === 'start') hint = 'Wie viel Bargeld lag in der Kasse, bevor der erste Eintrag kam? Am besten nachzählen.';
+    else if (entry.typ === 'zbon') hint = opts.mode === 'scan' ? 'Werte mit dem Bon vergleichen. Leere Felder zählen als 0.' : 'Leere Felder zählen als 0. Beträge brutto, wie auf dem Bon.';
+    else if (opts.mode === 'scan') hint = Object.keys(flagged).length ? 'Orange markierte Felder bitte prüfen.' : 'Stimmt alles? Dann speichern.';
+    $('editorHint').textContent = hint;
+
+    const box = $('fields');
+    box.innerHTML = '';
+    for (const f of form.fields) {
+      const wrap = el('div', 'field' + (flagged[f.key] ? ' missing' : ''));
+      const id = 'f_' + f.key;
+      const label = el('label', '', f.label + (f.type === 'money' ? ' (€)' : ''));
+      label.htmlFor = id;
+      const input = document.createElement('input');
+      input.id = id; input.name = f.key;
+      const v = entry[f.key];
+      if (f.type === 'date') { input.type = 'date'; input.value = v || ''; }
+      else if (f.type === 'money') {
+        input.type = 'text'; input.inputMode = 'decimal'; input.className = 'money'; input.autocomplete = 'off';
+        input.placeholder = '0,00'; input.value = v ? P.formatCents(v) : (v === 0 && f.allowZero ? '0,00' : '');
+      } else { input.type = 'text'; input.autocapitalize = 'words'; input.value = v || ''; input.placeholder = f.placeholder || ''; }
+      input.addEventListener('input', () => { wrap.classList.remove('missing'); const n = wrap.querySelector('.note'); if (n) n.remove(); updateCalc(); });
+      wrap.append(label, input);
+      if (flagged[f.key]) wrap.appendChild(el('div', 'note', flagged[f.key]));
+      box.appendChild(wrap);
+    }
+    updateCalc();
+    $('editor').hidden = false;
+  }
+
+  // Live-Rechnung beim Tagesabschluss
+  function updateCalc() {
+    const calc = $('calc');
+    if (!editing || editing.entry.typ !== 'zbon') { calc.hidden = true; return; }
+    const z = {};
+    for (const f of K.ZBON) z[f.key] = readMoney($('f_' + f.key).value) || 0;
+    const bar = P.zbonBar(z);
+    calc.hidden = false;
+    calc.innerHTML = '';
+    const line = el('div', 'calc-main');
+    line.append(el('span', '', 'Bar-Einnahme'), el('strong', bar < 0 ? 'neg' : '', eur(bar)));
+    calc.append(line, el('div', 'calc-formula', '19 % + 7 % + Gutscheinverkauf − EC − eingelöste Gutscheine'));
+    const lb = editing.opts.barLautBon;
+    if (lb) {
+      const same = lb === bar;
+      calc.appendChild(el('div', 'calc-check ' + (same ? 'ok' : 'bad'),
+        same ? '✓ Passt zu „Bar“ auf dem Bon' : '⚠ Auf dem Bon steht Bar ' + eur(lb) + ' – bitte Werte prüfen'));
+    }
+  }
+
+  function closeEditor() { $('editor').hidden = true; editing = null; }
 
   function mark(input, msg) {
     const wrap = input.parentElement;
     wrap.classList.add('missing');
     let n = wrap.querySelector('.note');
-    if (!n) { n = document.createElement('div'); n.className = 'note'; wrap.appendChild(n); }
+    if (!n) { n = el('div', 'note'); wrap.appendChild(n); }
     n.textContent = msg;
+  }
+
+  async function onSubmit(ev) {
+    ev.preventDefault();
+    const typ = editing.entry.typ;
+    const out = Object.assign({}, editing.entry);
+    let ok = true;
+    for (const f of FORMS[typ].fields) {
+      const input = $('f_' + f.key);
+      let v = input.value.trim();
+      if (f.type === 'money') {
+        const c = readMoney(v);
+        if (v && (c === null || c < 0)) { mark(input, 'Bitte als Betrag eingeben, z. B. 12,50'); ok = false; continue; }
+        if (f.required && !c) { mark(input, 'Bitte Betrag eintragen'); ok = false; continue; }
+        if (f.allowZero && c === null) { mark(input, 'Bitte eintragen (auch 0 ist möglich)'); ok = false; continue; }
+        v = c;
+      }
+      if (f.type === 'date' && !v) { mark(input, 'Bitte Datum wählen'); ok = false; continue; }
+      out[f.key] = v === '' ? null : v;
+    }
+    if (ok && typ === 'zbon' && !K.ZBON.some((f) => out[f.key])) { mark($('f_u19'), 'Bitte mindestens einen Betrag eintragen'); ok = false; }
+    if (!ok) return;
+
+    if (typ === 'start') {
+      await setSetting('anfangsbestand', { datum: out.datum, betrag: out.betrag || 0 });
+    } else {
+      delete out.haendler;
+      if (!out.erstellt) out.erstellt = new Date().toISOString();
+      await saveEntry(out);
+    }
+    closeEditor();
+    await reload();
+    toast('Gespeichert');
+  }
+
+  function openStart() {
+    openEditor({ typ: 'start', datum: START ? START.datum : todayIso(), betrag: START ? START.betrag : null }, { mode: 'edit' });
+  }
+
+  // ---------- Auswahl-Blatt ----------
+  function choose(title, hint, options) {
+    $('choiceTitle').textContent = title;
+    $('choiceHint').textContent = hint || '';
+    $('choiceHint').hidden = !hint;
+    const list = $('choiceList');
+    list.innerHTML = '';
+    for (const o of options) {
+      const b = el('button', 'choice');
+      b.type = 'button';
+      b.append(el('b', '', o.label));
+      if (o.sub) b.append(el('small', '', o.sub));
+      b.addEventListener('click', () => { $('choice').hidden = true; o.run(); });
+      list.appendChild(b);
+    }
+    $('choice').hidden = false;
   }
 
   // ---------- Texterkennung ----------
@@ -256,51 +390,74 @@
     } catch (e) { return null; }
   }
 
-  async function processFile(file) {
+  async function processFile(file, typ) {
     if (!file) return;
     const img = await loadImg(file);
     $('busyImg').src = img.src;
-    $('busyText').textContent = 'Kassenzettel wird gelesen …';
+    $('busyText').textContent = typ === 'zbon' ? 'Tagesabschluss wird gelesen …' : 'Beleg wird gelesen …';
     setBar('busyBar', 0.03);
     $('busy').hidden = false;
 
-    let result = {};
+    let text = '', qr = null, failed = false;
     try {
       onProgress = (p) => setBar('busyBar', 0.1 + p * 0.9);
       await loadVendor();
-      const big = drawScaled(img, 2000);
-      const qr = scanQr(big);
+      if (typ === 'ausgabe') qr = scanQr(drawScaled(img, 2000));
       setBar('busyBar', 0.08);
-      const ocrCanvas = enhance(drawScaled(img, 1600));
       const worker = await getWorker();
-      const { data } = await worker.recognize(ocrCanvas);
-      result = P.combine(P.parseOcrText(data.text), qr);
+      const { data } = await worker.recognize(enhance(drawScaled(img, 1800)));
+      text = data.text || '';
     } catch (e) {
       console.error(e);
-      toast('Automatisches Lesen hat nicht geklappt – bitte von Hand eintragen.', 4000);
-      result = {};
+      failed = true;
+      toast('Automatisches Lesen hat nicht geklappt – bitte Werte von Hand eintragen.', 4000);
     } finally {
       $('busy').hidden = true;
       URL.revokeObjectURL(img.src);
     }
-    openEditor({ datum: result.datum, haendler: result.haendler, betrag: result.betrag }, { quelle: result.quelle });
+
+    const flagged = {};
+    let entry, extra = {};
+    if (typ === 'zbon') {
+      const z = P.parseZBon(text);
+      entry = { typ: 'zbon', datum: z.datum, u19: z.u19, u7: z.u7, u0: z.u0, ec: z.ec, gutschein: z.gutschein };
+      extra.barLautBon = z.barLautBon;
+      if (!failed && !z.u19 && !z.u7 && !z.u0) flagged.u19 = 'Umsätze nicht erkannt – bitte vom Bon abtippen';
+    } else {
+      const r = P.combine(P.parseOcrText(text), qr);
+      entry = { typ: 'ausgabe', datum: r.datum, text: r.haendler, betrag: r.betrag };
+      if (!failed && !r.betrag) flagged.betrag = 'Nicht erkannt';
+      if (!failed && !r.haendler) flagged.text = 'Nicht erkannt';
+    }
+    if (!entry.datum) { entry.datum = todayIso(); if (!failed) flagged.datum = 'Nicht erkannt – heute eingesetzt, bitte prüfen'; }
+    openEditor(entry, Object.assign({ mode: 'scan', flagged: flagged }, extra));
   }
 
   // ---------- Excel ----------
-  async function exportExcel() {
-    const entries = (await allEntries()).sort((a, b) => (a.datum || '').localeCompare(b.datum || '') || a.id - b.id);
-    if (!entries.length) { toast('Noch keine Einträge zum Exportieren'); return; }
-    const blob = window.XlsxLite.build(FIELDS, entries, { sheetName: 'Kassenbuch' });
-    const name = 'Kassenbuch_' + todayIso() + '.xlsx';
+  function exportMenu() {
+    if (!ENTRIES.length) { toast('Noch keine Einträge zum Exportieren'); return; }
+    if (!START) { toast('Bitte zuerst den Kassenbestand zu Beginn eintragen'); openStart(); return; }
+    const opts = K.months(ENTRIES).map((m) => ({ label: K.monthLabel(m), run: () => exportExcel(m) }));
+    opts.push({ label: 'Alle Einträge', sub: 'Vom Anfangsbestand bis heute', run: () => exportExcel(null) });
+    choose('Excel erstellen', 'Für welchen Zeitraum?', opts);
+  }
+
+  async function exportExcel(month) {
+    const out = K.buildSheet(ENTRIES, START, month);
+    const blob = window.XlsxLite.build(out.sheet);
+    const name = (month ? 'Kassenbuch_' + month : 'Kassenbuch_gesamt_' + todayIso()) + '.xlsx';
     const file = new File([blob], name, { type: blob.type });
     if (navigator.canShare && navigator.canShare({ files: [file] })) {
-      try { await navigator.share({ files: [file], title: 'Kassenbuch' }); return; }
+      try { await navigator.share({ files: [file], title: out.title }); return; }
       catch (e) { if (e.name === 'AbortError') return; }
     }
+    // Download (Android: Chrome teilt keine .xlsx-Dateien). Die Daten bleiben lange verfügbar,
+    // weil Chrome erst nach der Rückfrage „Datei herunterladen?“ wirklich liest.
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = name;
     document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    setTimeout(() => URL.revokeObjectURL(a.href), 10 * 60 * 1000);
+    toast(out.title + ' erstellt – siehe Downloads', 4000);
   }
 
   // ---------- Start / Offline-Einrichtung ----------
@@ -328,27 +485,53 @@
     toast('Fertig eingerichtet – ab jetzt geht alles offline.', 3500);
   }
 
+  function needStart(fn) {
+    return (ev) => {
+      if (START) return fn(ev);
+      if (ev && ev.preventDefault) ev.preventDefault();
+      toast('Bitte zuerst den Kassenbestand zu Beginn eintragen');
+      openStart();
+    };
+  }
+
+  let galleryTyp = 'ausgabe';
   function wire() {
-    const onPick = (ev) => { const f = ev.target.files[0]; ev.target.value = ''; processFile(f); };
-    $('camInput').addEventListener('change', onPick);
-    $('galleryInput').addEventListener('change', onPick);
-    $('manualBtn').addEventListener('click', () => openEditor({ datum: todayIso() }, { manual: true }));
-    $('exportBtn').addEventListener('click', exportExcel);
+    const pick = (typ) => (ev) => { const f = ev.target.files[0]; ev.target.value = ''; processFile(f, typ); };
+    $('camZbon').addEventListener('change', pick('zbon'));
+    $('camAusgabe').addEventListener('change', pick('ausgabe'));
+    $('galleryInput').addEventListener('change', (ev) => pick(galleryTyp)(ev));
+    // Ohne Anfangsbestand erst diesen abfragen
+    document.querySelector('label[for=camZbon]').addEventListener('click', needStart(() => {}));
+    document.querySelector('label[for=camAusgabe]').addEventListener('click', needStart(() => {}));
+
+    $('galleryBtn').addEventListener('click', needStart(() => choose('Foto aus der Galerie', 'Was ist auf dem Foto?', [
+      { label: 'Tagesabschluss (Z-Bon)', run: () => { galleryTyp = 'zbon'; $('galleryInput').click(); } },
+      { label: 'Ausgabe-Beleg', run: () => { galleryTyp = 'ausgabe'; $('galleryInput').click(); } }
+    ])));
+    $('manualBtn').addEventListener('click', needStart(() => choose('Von Hand eintragen', '', [
+      { label: 'Tagesabschluss', sub: 'Umsätze, EC, Gutscheine vom Z-Bon', run: () => openEditor({ typ: 'zbon', datum: todayIso() }, { mode: 'manual' }) },
+      { label: 'Ausgabe', sub: 'Einkauf, Bankeinzahlung, Entnahme …', run: () => openEditor({ typ: 'ausgabe', datum: todayIso() }, { mode: 'manual' }) },
+      { label: 'Sonstige Einnahme', sub: 'Privateinlage, Wechselgeld von der Bank …', run: () => openEditor({ typ: 'einnahme', datum: todayIso() }, { mode: 'manual' }) }
+    ])));
+    $('exportBtn').addEventListener('click', exportMenu);
+    $('bestandBtn').addEventListener('click', openStart);
+    $('choiceCancel').addEventListener('click', () => { $('choice').hidden = true; });
     $('form').addEventListener('submit', onSubmit);
     $('cancelBtn').addEventListener('click', closeEditor);
     $('deleteBtn').addEventListener('click', async () => {
-      if (!editing || !editing.id) return;
+      if (!editing || !editing.entry.id) return;
       if (!confirm('Diesen Eintrag wirklich löschen?')) return;
-      await deleteEntry(editing.id);
-      closeEditor(); await render(); toast('Gelöscht');
+      await deleteEntry(editing.entry.id);
+      closeEditor(); await reload(); toast('Gelöscht');
     });
   }
 
   async function start() {
     wire();
-    await render();
+    await reload();
     if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
     try { await setupOffline(); } catch (e) { console.error(e); }
+    if (!START) openStart();
     // Texterkennung im Hintergrund vorwärmen, damit der erste Scan schneller geht
     setTimeout(() => getWorker().catch(() => {}), 1500);
   }
