@@ -5,7 +5,7 @@
   const K = window.Kassenbuch;
   const $ = (id) => document.getElementById(id);
 
-  const APP_VERSION = 9;   // sichtbar unten in der Liste – zum Prüfen, ob ein Update angekommen ist
+  const APP_VERSION = 11;   // sichtbar unten in der Liste – zum Prüfen, ob ein Update angekommen ist
   const USE_SW = 'serviceWorker' in navigator && !/[?&]nosw\b/.test(location.search);
   const abs = (p) => new URL(p, location.href).href;
 
@@ -233,6 +233,17 @@
     raw.hidden = true;
     $('rawBtn').hidden = !(opts.mode === 'scan' && opts.ocrText);
     $('rawText').value = opts.ocrText || '';
+    const diag = $('rawDiag');
+    diag.innerHTML = '';
+    if (opts.trace) {
+      diag.appendChild(el('b', '', 'So wurde der Text gelesen:'));
+      if (!opts.trace.length) diag.appendChild(el('div', 'diag-row', 'Keine passenden Zeilen gefunden.'));
+      for (const t of opts.trace) {
+        const r = el('div', 'diag-row');
+        r.append(el('span', 'diag-role', t.rolle), el('code', '', t.zeile));
+        diag.appendChild(r);
+      }
+    }
     $('editor').hidden = false;
   }
 
@@ -413,6 +424,7 @@
     let entry, extra = {};
     if (typ === 'zbon') {
       const z = P.parseZBon(text);
+      extra.trace = z.trace;
       entry = { typ: 'zbon', datum: z.datum, u19: z.u19, u7: z.u7, u0: z.u0, ec: z.ec, gutschein: z.gutschein, aus: z.aus, ein: z.ein, abl: z.abl };
       extra.barLautBon = z.barLautBon;
       if (!failed && !z.u19 && !z.u7 && !z.u0) flagged.u19 = 'Umsätze nicht erkannt – bitte vom Bon abtippen';

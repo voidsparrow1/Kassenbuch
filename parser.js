@@ -288,23 +288,53 @@
   }
 
   // "53.15 von 812.40" – erkennt die Zeile auch ohne Überschrift (OCR-Varianten: "uon", "v0n", "vom")
-  const VON_RE = /\d\s?[.,]\s?\d{2}\s*\S?\s*\b[vu][o0][nm]\b\s*-?\d/i;
+  const VON_RE = /\d\s?[.,]\s?\d{2}\s*\S{0,2}\s*\b[vuy][o0][nm]\b/i;
+
+  let TRACE = null;   // Diagnose: welche Zeile wofür verwendet wurde
+  const trace = function (line, role) { if (TRACE) TRACE.push({ zeile: line, rolle: role }); };
+
+  // Liest den Block der Reihe nach: auf jedes "von" folgt der zugehörige Betrag – in derselben Zeile
+  // oder (bei schräg fotografierten Bons) eine Zeile tiefer, oft hinter dem nächsten Steuersatz:
+  //     1   7.00 %
+  //     53,15€ von
+  //     2  19.00 %      812,40     ← Betrag zur Zeile darüber
+  const TOKEN_RE = /(\+?-?\d{1,3}(?:\.\d{3})+\s?,\s?\d{2}(?!\d)|\+?-?\d+\s?[.,]\s?\d{2}(?!\d))|\b([vuy][o0][nm])\b/gi;
 
   function parseTaxBlock(lines) {
     const sums = {}, seen = {}, items = [];
-    let hint = null, inBlock = false;
-    for (let i = 0; i < lines.length; i++) {
-      const l = lines[i];
-      if (/mehr.{0,4}steuer|mehrwert|^\W*mwst\W*$/i.test(l)) { inBlock = true; continue; }
-      if (inBlock && /umsatz\s*gel|gel[öo]scht|^\W*summe\b|^\W*gesamt/i.test(l) && !VON_RE.test(l)) inBlock = false;
-      const m = l.match(/(\d{1,2})\s?[.,]\s?(\d{2})\s?%/g);
-      if (m) hint = parseInt(m[m.length - 1].replace(/^\D*?(\d{1,2})\s?[.,].*$/, '$1'), 10);
-      const a = amountsIn(stripPct(l)).map(Math.abs);
-      if (a.length >= 2 && (VON_RE.test(l) || (inBlock && !m))) {
-        const res = inferRate(a[0], a[a.length - 1], hint);
-        sums[res.r] = (sums[res.r] || 0) + res.brutto; seen[res.r] = true;
-        items.push({ r: res.r, brutto: res.brutto });
-        hint = null;
+    let start = lines.findIndex(function (l) { return /mehr.{0,4}steuer|mehrwert|^\W*mwst\W*$/i.test(l); });
+    if (start < 0) {
+      const v = lines.findIndex(function (l) { return VON_RE.test(l); });
+      if (v < 0) return null;
+      start = Math.max(0, v - 2);
+    }
+    let hint = null, pending = null, pendingHint = null, pendingLine = '';
+    for (let i = start; i < lines.length; i++) {
+      let l = lines[i];
+      if (i > start && /umsatz\s*gel|gel[öo]scht/i.test(l)) break;
+      // Satzzeile: "1   7.00 %", "10  7.00 %", auch ohne lesbares "%" ("11  0.00 ;")
+      // (nicht bei "von"-Zeilen, und ohne "%" nur bei üblichen Sätzen – sonst ist es ein Betrag mit Störzeichen davor)
+      let rm = /\b[vuy][o0][nm]\b/i.test(l) ? null : l.match(/^\W*\d{1,2}\s+(\d{1,2})\s?[.,]\s?(\d{2})(\s*[%;:&8x])?(?=\s|$)/);
+      if (rm && !rm[3] && [0, 5, 7, 16, 19].indexOf(parseInt(rm[1], 10)) < 0) rm = null;
+      const pm = !rm && l.match(/(\d{1,2})\s?[.,]\s?\d{2}\s?%/);
+      if (rm) { hint = parseInt(rm[1], 10); l = l.slice(rm[0].length); }
+      else if (pm) { hint = parseInt(pm[1], 10); l = stripPct(l); }
+      let lastAmt = null;
+      TOKEN_RE.lastIndex = 0;
+      let m;
+      while ((m = TOKEN_RE.exec(l))) {
+        if (m[2]) {                                   // "von"
+          if (lastAmt !== null) { pending = lastAmt; pendingHint = hint; pendingLine = lines[i]; lastAmt = null; }
+          continue;
+        }
+        const v = Math.abs(toCents(m[1].replace('+', '')) || 0);
+        if (pending !== null) {
+          const res = inferRate(pending, v, pendingHint);
+          sums[res.r] = (sums[res.r] || 0) + res.brutto; seen[res.r] = true;
+          items.push({ r: res.r, brutto: res.brutto });
+          trace(pendingLine + (pendingLine === lines[i] ? '' : ' ⏎ ' + lines[i]), 'Umsatz ' + res.r + ' %: ' + formatCents(res.brutto));
+          pending = null; hint = null;
+        } else lastAmt = v;
       }
     }
     if (!Object.keys(seen).length) return null;
@@ -313,7 +343,7 @@
 
   // Block "Zahlungsmittel": Abschnitte "Bar", "(EC)", "(Gutschein)" … mit Zahlungen, Rückgeld, Ausgaben …
   const PAY_KEYS = [['zahlungen', /zahlungen/i], ['rueckgeld', /r[üu]ckgeld/i], ['einnahmen', /einnahmen/i], ['ausgaben', /ausgaben/i],
-    ['stockgeld', /stockgeld/i], ['ablieferung', /ablieferung/i], ['soll', /\bsoll\b/i], ['ist', /\bist\b/i], ['differenz', /differenz/i]];
+    ['stockgeld', /st[oa0]ckgeld/i], ['ablieferung', /ablieferung/i], ['soll', /\bso[l1i\]|!]{2}(?=\s|$)/i], ['ist', /\bist\b/i], ['differenz', /differenz/i]];
 
   function parsePayments(lines) {
     // Beginn: Überschrift "Zahlungsmittel" (oft eingerahmt und unlesbar) oder der Abschnitt "Bar"
@@ -335,25 +365,35 @@
       const l = lines[i];
       if (/auf[\s\-\/=]*ab|abschlag|mehrwert|warengruppe/i.test(l) || VON_RE.test(l)) break;
       const key = PAY_KEYS.find(function (k) { return k[1].test(l); });
+      // Abschnitt an seinem Inhalt erkennen ("1 EC = 1.00 €", "380.00 EC"), falls die Überschrift unleserlich ist.
+      // Nur Inhaltszeilen zählen – die Überschrift "(EC)" des nächsten Abschnitts gehört nicht dazu.
+      const isContent = key || amountsIn(l).length;
+      if (sec && isContent && /\bEC\b/.test(l)) sec.hasEC = true;
       if (!key) {
         if (amountsIn(l).length) continue;                       // z. B. "1 EC = 1.00 €"
         const name = l.replace(/[^A-Za-zÄÖÜäöüß\s\-]/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
-        if (name && name.length <= 24) { sec = { name: name, v: {} }; secs.push(sec); }
+        if (name && name.length <= 24) { sec = { name: name, v: {} }; secs.push(sec); trace(l, 'Abschnitt „' + name + '“'); }
         continue;
       }
       if (!sec) continue;
-      let v = absLast(l);
+      let v = absLast(l), used = l;
+      // "9 Zahlungen" – Betrag steht in der Zeile darunter ("380.00 EC 380.00")
+      if (v === null && lines[i + 1] && !PAY_KEYS.some(function (k) { return k[1].test(lines[i + 1]); })) {
+        const nx = absLast(lines[i + 1]);
+        if (nx !== null) { v = nx; used = l + ' ⏎ ' + lines[i + 1]; i++; }
+      }
       const count = l.match(/^\W*(\d+)\s+[A-Za-zÄÖÜäöü]/);
       if (count && /^0+$/.test(count[1]) && /einnahmen|ausgaben|stockgeld|ablieferung/.test(key[0])) v = 0;
-      if (v !== null && !(key[0] in sec.v)) sec.v[key[0]] = v;
+      if (v !== null && !(key[0] in sec.v)) { sec.v[key[0]] = v; trace(used, sec.name + ' / ' + key[0] + ': ' + formatCents(v)); }
     }
     if (!secs.length) return null;
     const res = { ec: null, gutschein: null, barLautBon: null, aus: null, ein: null, abl: null };
     const nz = function (v) { return v && v >= 100 ? v : null; };
     const plus = function (a, b) { return b ? (a || 0) + b : a; };
+    secs.forEach(function (s) { if (s.hasEC && !/(^|\s)ec(\s|$)/.test(s.name)) trace('„' + s.name + '“', 'als EC-Abschnitt erkannt (Inhalt enthält „EC“)'); });
     secs.forEach(function (s, idx) {
       const v = s.v, paid = v.zahlungen !== undefined ? v.zahlungen : v.soll;
-      const other = /gutsch|(^|\s)ec(\s|$)|karte|giro|kredit|visa|master|maestro|unbar/.test(s.name);
+      const other = s.hasEC || /gutsch|(^|\s)ec(\s|$)|karte|giro|kredit|visa|master|maestro|unbar/.test(s.name);
       // "Bar" steht immer als erster Abschnitt; die Überschrift ist oft unleserlich ("ar", "8ar")
       if (/(^|\s)bar(\s|$)/.test(s.name) || (idx === secs.findIndex(function (x) { return 'zahlungen' in x.v; }) && !other)) {
         // Nebenwerte nur übernehmen, wenn sie zum Soll passen (sonst Lesefehler wie "0.08")
@@ -363,6 +403,8 @@
           if (full !== v.soll && base === v.soll) { v.einnahmen = 0; v.ausgaben = 0; v.ablieferung = 0; }
         }
         if (v.zahlungen !== undefined) res.barLautBon = v.zahlungen - (v.rueckgeld || 0);
+        // "Zahlungen" unleserlich: aus Soll zurückrechnen
+        else if (v.soll !== undefined) res.barLautBon = v.soll - (v.stockgeld || 0) - (v.einnahmen || 0) + (v.ausgaben || 0) + (v.ablieferung || 0);
         res._bar = { zahlungen: v.zahlungen, rueckgeld: v.rueckgeld || 0 };
         res.ein = nz(v.einnahmen); res.aus = nz(v.ausgaben); res.abl = nz(v.ablieferung);
       } else if (/gutsch/.test(s.name)) res.gutschein = plus(res.gutschein, paid);
@@ -372,6 +414,7 @@
   }
 
   function parseZBon(text) {
+    TRACE = [];
     const lines = String(text || '').split(/\r?\n/).map(function (l) {
       return l.trim()
         .replace(/(\d[.,]\d{2})\d(?=\s|$)/g, '$1')   // Störzeichen am Bonrand: "250,508" → "250,50"
@@ -403,6 +446,10 @@
     out.korrigiert = null;
     if (tax && pay && pay._bar && pay._bar.zahlungen !== undefined) reconcile(out, tax.items, pay._bar);
     delete out._bar;
+    if (!tax) trace('–', 'Kein Mehrwertsteuer-Block gefunden (keine „… von …“-Zeilen)');
+    if (!pay) trace('–', 'Kein Zahlungsblock gefunden (keine „Bar“- oder „Zahlungen“-Zeile)');
+    Object.defineProperty(out, 'trace', { value: TRACE, enumerable: false });
+    TRACE = null;
     return out;
   }
 

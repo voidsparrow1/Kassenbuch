@@ -166,3 +166,8 @@ body {
 .muted { color: var(--muted); font-size: 14px; }
 .raw textarea { width: 100%; font: 12px/1.35 var(--mono); padding: 8px; border-radius: 10px; border: 1px solid var(--line); background: var(--paper); color: var(--ink); }
 .version { text-align: center; color: var(--muted); font-size: 12px; margin: 18px 0 4px; }
+.diag { font-size: 13px; margin-bottom: 10px; }
+.diag b { display: block; margin-bottom: 6px; }
+.diag-row { padding: 6px 0; border-top: 1px dashed var(--line); }
+.diag-role { display: block; font-weight: 600; color: var(--accent); }
+.diag-row code { font: 12px var(--mono); color: var(--muted); white-space: pre-wrap; word-break: break-word; }
