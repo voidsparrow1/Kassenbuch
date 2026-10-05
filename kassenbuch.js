@@ -11,7 +11,8 @@
     { key: 'ec', label: 'EC-/Kartenzahlungen', text: 'EC-/Kartenzahlungen (unbar)', sign: -1 },
     { key: 'gutschein', label: 'Gutscheine eingelöst', text: 'Gutscheine eingelöst', sign: -1 },
     { key: 'aus', label: 'Auszahlungen / Ausgaben', text: 'Auszahlungen laut Kassenabrechnung', sign: -1, extra: true },
-    { key: 'ein', label: 'Einzahlungen / Einlagen', text: 'Einzahlungen laut Kassenabrechnung', sign: 1, extra: true }
+    { key: 'ein', label: 'Einzahlungen / Einlagen', text: 'Einzahlungen laut Kassenabrechnung', sign: 1, extra: true },
+    { key: 'abl', label: 'Ablieferung (Bank/Tresor)', text: 'Ablieferung laut Kassenabrechnung', sign: -1, extra: true }
   ];
   const TYP_ORDER = { zbon: 0, einnahme: 1, ausgabe: 2 };
 

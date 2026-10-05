@@ -251,15 +251,98 @@
     return null;
   }
 
+  // ---------- Kassenabrechnung im Waagenkassen-Format (Bizerba/Mettler u. ä.) ----------
+  // Block "Mehrwertsteuer":   "1   7.00 %"  /  "53.15 von 812.40"   (Satz kann mehrfach vorkommen)
+  const stripPct = function (l) { return l.replace(/\d{1,3}\s?(?:[.,]\s?\d{1,2})?\s?%/g, ' '); };
+  const absLast = function (l) { const a = amountsIn(stripPct(l)); return a.length ? Math.abs(a[a.length - 1]) : null; };
+
+  // Steuersatz aus "Steuer von Betrag" ableiten (robust gegen falsch gelesene Prozentangaben).
+  // Liefert {r, brutto}. Betrag ist brutto oder netto – beides wird geprüft.
+  function inferRate(tax, base, hint) {
+    let best = null;
+    for (const r of [0, 7, 19]) {
+      for (const netto of [false, true]) {
+        const exp = r ? Math.round(base * r / (netto ? 100 : 100 + r)) : 0;
+        const err = Math.abs(tax - exp);
+        const score = err - (r === hint ? 1.5 : 0) + (netto ? 0.5 : 0);   // leichte Vorliebe für gedruckten Satz und brutto
+        if (!best || score < best.score) best = { r: r, brutto: netto ? base + tax : base, score: score, err: err, exp: exp };
+      }
+    }
+    // Weicht die Steuer stark ab, dem gedruckten Satz vertrauen (falls plausibel)
+    if (best.err > Math.max(3, best.exp * 0.03) && (hint === 0 || hint === 7 || hint === 19)) return { r: hint, brutto: base };
+    return best;
+  }
+
+  function parseTaxBlock(lines) {
+    const start = lines.findIndex(function (l) { return /mehrwert|^\W*mwst\W*$/i.test(l); });
+    if (start < 0) return null;
+    const sums = {}, seen = {};
+    let hint = null;
+    for (let i = start + 1; i < lines.length; i++) {
+      const l = lines[i];
+      if (/umsatz\s*gel|gel[öo]scht|^\W*summe\b|^\W*gesamt/i.test(l) && !/von/i.test(l)) break;
+      const m = l.match(/(\d{1,2})\s?[.,]\s?(\d{2})\s?%/g);
+      const a = amountsIn(stripPct(l)).map(Math.abs);
+      if (m) hint = parseInt(m[m.length - 1].slice(-8).replace(/^\D*?(\d{1,2})\s?[.,].*$/, '$1'), 10);
+      if (a.length >= 2 && (/v[o0]n/i.test(l) || !m)) {
+        const res = inferRate(a[0], a[a.length - 1], hint);
+        sums[res.r] = (sums[res.r] || 0) + res.brutto; seen[res.r] = true;
+        hint = null;
+      }
+    }
+    if (!Object.keys(seen).length) return null;
+    return { u19: sums[19] || null, u7: sums[7] || null, u0: sums[0] || null };
+  }
+
+  // Block "Zahlungsmittel": Abschnitte "Bar", "(EC)", "(Gutschein)" … mit Zahlungen, Rückgeld, Ausgaben …
+  const PAY_KEYS = [['zahlungen', /zahlungen/i], ['rueckgeld', /r[üu]ckgeld/i], ['einnahmen', /einnahmen/i], ['ausgaben', /ausgaben/i],
+    ['stockgeld', /stockgeld/i], ['ablieferung', /ablieferung/i], ['soll', /\bsoll\b/i], ['ist', /\bist\b/i], ['differenz', /differenz/i]];
+
+  function parsePayments(lines) {
+    const start = lines.findIndex(function (l) { return /zahlungsmittel|zahlungsarten/i.test(l); });
+    if (start < 0) return null;
+    const secs = [];
+    let sec = null;
+    for (let i = start + 1; i < lines.length; i++) {
+      const l = lines[i];
+      if (/auf[\s\-\/]*ab|abschlag|mehrwert|warengruppe/i.test(l)) break;
+      const key = PAY_KEYS.find(function (k) { return k[1].test(l); });
+      if (!key) {
+        if (amountsIn(l).length) continue;                       // z. B. "1 EC = 1.00 €"
+        const name = l.replace(/[^A-Za-zÄÖÜäöüß\s\-]/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+        if (name && name.length <= 24) { sec = { name: name, v: {} }; secs.push(sec); }
+        continue;
+      }
+      if (!sec) continue;
+      const v = absLast(l);
+      if (v !== null && !(key[0] in sec.v)) sec.v[key[0]] = v;
+    }
+    if (!secs.length) return null;
+    const res = { ec: null, gutschein: null, barLautBon: null, aus: null, ein: null, abl: null };
+    const nz = function (v) { return v ? v : null; };
+    const plus = function (a, b) { return b ? (a || 0) + b : a; };
+    for (const s of secs) {
+      const v = s.v, paid = v.zahlungen !== undefined ? v.zahlungen : v.soll;
+      if (/(^|\s)bar(\s|$)/.test(s.name)) {
+        if (v.zahlungen !== undefined) res.barLautBon = v.zahlungen - (v.rueckgeld || 0);
+        res.ein = nz(v.einnahmen); res.aus = nz(v.ausgaben); res.abl = nz(v.ablieferung);
+      } else if (/gutsch/.test(s.name)) res.gutschein = plus(res.gutschein, paid);
+      else if (/(^|\s)ec(\s|$)|karte|giro|kredit|visa|master|maestro|unbar/.test(s.name)) res.ec = plus(res.ec, paid);
+    }
+    return res;
+  }
+
   function parseZBon(text) {
     const lines = String(text || '').split(/\r?\n/).map(function (l) {
       return l.trim()
         .replace(/(\d[.,]\d{2})\d(?=\s|$)/g, '$1')   // Störzeichen am Bonrand: "250,508" → "250,50"
         .replace(/[©®]/g, '0');                       // "712,2©" → "712,20"
     }).filter(Boolean);
+
+    // Allgemeines Format (Umsatz je Steuersatz, Zahlungsarten als Einzelzeilen)
     let u0 = rateGross(lines, 0);
     if (u0 === null) u0 = findLine(lines, /gutschein\w*[\s\-:]*(?:verk|ausgabe|aufladung)|verk\w*[\s\-:]*gutschein/i);
-    return {
+    const out = {
       datum: findDate(text || ''),
       u19: rateGross(lines, 19),
       u7: rateGross(lines, 7),
@@ -269,8 +352,16 @@
       barLautBon: findLine(lines, /(^|\s)bar(\s|:|$)|barzahlung|bargeld/i, /unbar|gegeben|zur[üu]ck|r[üu]ckgeld|wechsel|einlage|entnahme|auszahl|einzahl|bestand|soll/i),
       // Bargeld, das ohne Verkauf aus der Kasse genommen bzw. hineingelegt wurde
       aus: findLine(lines, /aus[\s\-]?zahlung|ausgabe|entnahme|paid\s*out/i, /gutschein|r[üu]ckgeld|wechselgeld/i),
-      ein: findLine(lines, /ein[\s\-]?zahlung|einlage|paid\s*in/i, /gutschein/i)
+      ein: findLine(lines, /ein[\s\-]?zahlung|einlage|paid\s*in/i, /gutschein/i),
+      abl: null
     };
+
+    // Waagenkassen-Format: Blöcke haben Vorrang, wenn sie gefunden werden
+    const tax = parseTaxBlock(lines);
+    if (tax) { out.u19 = tax.u19; out.u7 = tax.u7; out.u0 = tax.u0; }
+    const pay = parsePayments(lines);
+    if (pay) Object.assign(out, pay);
+    return out;
   }
 
   // Bargeld aus Verkäufen = 19 % + 7 % + 0 % − EC/Karte − eingelöste Gutscheine

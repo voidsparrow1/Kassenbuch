@@ -95,6 +95,7 @@
       if (e.gutschein) parts.push('eingel.: −' + P.formatCents(e.gutschein));
       if (e.aus) parts.push('Ausz.: −' + P.formatCents(e.aus));
       if (e.ein) parts.push('Einz.: ' + P.formatCents(e.ein));
+      if (e.abl) parts.push('Abl.: −' + P.formatCents(e.abl));
       sub = parts.join(' · ');
       amt = '+' + eur(K.net(e));
     } else if (e.typ === 'einnahme') {
@@ -240,16 +241,16 @@
     const z = {};
     for (const f of K.ZBON) z[f.key] = readMoney($('f_' + f.key).value) || 0;
     const bar = P.zbonBar(z);
-    const total = bar - (z.aus || 0) + (z.ein || 0);
+    const total = bar - (z.aus || 0) + (z.ein || 0) - (z.abl || 0);
     calc.hidden = false;
     calc.innerHTML = '';
     const line = el('div', 'calc-main');
     line.append(el('span', '', 'Bar aus Verkäufen'), el('strong', bar < 0 ? 'neg' : '', eur(bar)));
     calc.append(line, el('div', 'calc-formula', '19 % + 7 % + Gutscheinverkauf − EC − eingelöste Gutscheine'));
-    if (z.aus || z.ein) {
+    if (z.aus || z.ein || z.abl) {
       const l2 = el('div', 'calc-main');
       l2.append(el('span', '', 'Kasse gesamt'), el('strong', total < 0 ? 'neg' : '', (total >= 0 ? '+' : '') + eur(total)));
-      calc.append(l2, el('div', 'calc-formula', 'Bar aus Verkäufen − Auszahlungen + Einzahlungen'));
+      calc.append(l2, el('div', 'calc-formula', 'Bar aus Verkäufen − Ausgaben + Einnahmen − Ablieferung'));
     }
     const lb = editing.opts.barLautBon;
     if (lb) {
@@ -410,7 +411,7 @@
     let entry, extra = {};
     if (typ === 'zbon') {
       const z = P.parseZBon(text);
-      entry = { typ: 'zbon', datum: z.datum, u19: z.u19, u7: z.u7, u0: z.u0, ec: z.ec, gutschein: z.gutschein, aus: z.aus, ein: z.ein };
+      entry = { typ: 'zbon', datum: z.datum, u19: z.u19, u7: z.u7, u0: z.u0, ec: z.ec, gutschein: z.gutschein, aus: z.aus, ein: z.ein, abl: z.abl };
       extra.barLautBon = z.barLautBon;
       if (!failed && !z.u19 && !z.u7 && !z.u0) flagged.u19 = 'Umsätze nicht erkannt – bitte vom Bon abtippen';
     } else {
