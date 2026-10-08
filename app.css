@@ -188,3 +188,4 @@ body {
 .field.check label { margin: 0; color: var(--ink); font-size: 16px; font-weight: 500; }
 .field.check input { width: 26px; height: 26px; min-height: 0; flex: none; accent-color: var(--accent); -webkit-appearance: checkbox; appearance: auto; }
 .field[hidden] { display: none !important; }
+.more-btn { text-align: left; padding: 4px 0 14px; font-size: 14px; text-decoration: underline; }

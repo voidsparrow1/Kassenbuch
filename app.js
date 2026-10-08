@@ -7,7 +7,7 @@
   const K = window.Kassenbuch;
   const $ = (id) => document.getElementById(id);
 
-  const APP_VERSION = 14;   // sichtbar unten in der Liste – zum Prüfen, ob ein Update angekommen ist
+  const APP_VERSION = 15;   // sichtbar unten in der Liste – zum Prüfen, ob ein Update angekommen ist
   const LATE_DAYS = 10;     // ab so vielen Tagen Abstand gilt eine Buchung als nachträglich erfasst
   const USE_SW = 'serviceWorker' in navigator && !/[?&]nosw\b/.test(location.search);
   const abs = (p) => new URL(p, location.href).href;
@@ -186,17 +186,17 @@
     const openPast = K.closableMonths(ENTRIES, START, CLOSED, today).filter((m) => ENTRIES.some((e) => (e.datum || '').startsWith(m)));
     if (!CHAIN.ok) {
       warn.hidden = false; warn.className = 'warn bad';
-      warn.textContent = '⚠ Prüfsumme stimmt nicht (Beleg ' + String(CHAIN.at || 0).padStart(4, '0') + ', ' + CHAIN.grund + '). Daten wurden außerhalb der App verändert.';
+      warn.textContent = '⚠ Die Daten wurden außerhalb der App verändert (ab Beleg ' + String(CHAIN.at || 0).padStart(4, '0') + '). Bitte den Steuerberater informieren.';
     } else if (!START) { warn.hidden = false; warn.textContent = 'Bitte zuerst oben den Kassenbestand zu Beginn eintragen.'; }
     else if (negDay) { warn.hidden = false; warn.textContent = '⚠ Kassenbestand ist am ' + deDate(negDay.datum) + ' negativ. Bitte Buchungen prüfen und ggf. stornieren.'; }
     else if (ENTRIES.length && LAST_BACKUP !== undefined && K.daysBetween((LAST_BACKUP || ENTRIES[0].erfasst || today).slice(0, 10), today) >= 7) {
       warn.hidden = false;
       warn.textContent = (LAST_BACKUP ? 'Letzte Datensicherung vor ' + K.daysBetween(LAST_BACKUP.slice(0, 10), today) + ' Tagen.' : 'Noch keine Datensicherung.') +
-        ' Unter „Kassenbuch“ → „Datensicherung“ sichern und z. B. per Mail an euch selbst schicken.';
+        ' Bitte unter „Kassenbuch“ → „Sichern und Steuerberater“ → „Datensicherung“ sichern.';
     }
     else if (openPast.length && +today.slice(8, 10) >= 5) {
       warn.hidden = false;
-      warn.textContent = K.monthLabel(openPast[openPast.length - 1]) + ' ist noch nicht abgeschlossen. Unter „Kassenbuch“ den Monat festschreiben.';
+      warn.textContent = K.monthLabel(openPast[openPast.length - 1]) + ' ist noch nicht abgeschlossen. Bitte unter „Kassenbuch“ abschließen.';
     } else warn.hidden = true;
 
     const list = $('list');
@@ -232,7 +232,7 @@
       b.addEventListener('click', openStart);
       list.append(head, b);
     }
-    const foot = el('div', 'version', 'App-Version ' + APP_VERSION + ' · ' + (CHAIN.ok ? '✓ Prüfsummen in Ordnung (' + CHAIN.count + ' Buchungen)' : '⚠ Prüfsummen fehlerhaft'));
+    const foot = el('div', 'version', 'App-Version ' + APP_VERSION + ' · ' + (CHAIN.ok ? '✓ Daten in Ordnung' : '⚠ Daten fehlerhaft'));
     list.appendChild(foot);
   }
 
@@ -246,29 +246,30 @@
       fields: [
         { key: 'datum', label: 'Datum', type: 'date' },
         { key: 'znr', label: 'Abrechnungs-Nr. (oben auf dem Bon, z. B. #340)', type: 'int', placeholder: 'z. B. 340' }
-      ].concat(K.ZBON.map((f) => ({ key: f.key, label: f.label + (f.sign < 0 ? ' (wird abgezogen)' : ''), type: 'money' })))
+      ].concat(K.ZBON.map((f) => ({ key: f.key, label: f.label + (f.sign < 0 ? ' (wird abgezogen)' : ''), type: 'money',
+        more: ['gutschein', 'aus', 'ein', 'abl'].indexOf(f.key) >= 0 })))
     },
     ausgabe: {
-      title: { scan: 'Ausgabe prüfen', manual: 'Ausgabe eintragen' },
+      title: { scan: 'Ausgabe prüfen', manual: 'Geld aus der Kasse' },
       fields: [
         { key: 'datum', label: 'Datum', type: 'date' },
-        { key: 'art', label: 'Art der Ausgabe', type: 'select', options: artOpts('ausgabe'), required: true },
-        { key: 'text', label: 'Wofür / bei wem', type: 'text', placeholder: 'z. B. Metro, Sparkasse', required: true },
+        { key: 'art', label: 'Wofür?', type: 'select', options: artOpts('ausgabe'), required: true },
+        { key: 'text', label: 'Kurze Beschreibung', type: 'text', placeholder: 'z. B. Metro, Sparkasse', required: true },
         { key: 'betrag', label: 'Betrag (brutto)', type: 'money', required: true },
-        { key: 'satz', label: 'Steuersatz auf dem Beleg', type: 'select', options: SATZ.concat([{ v: 'mix', l: 'gemischt: 19 % und 7 %' }]), required: true, showIf: hasVst('ausgabe') },
+        { key: 'satz', label: 'Steuersatz auf dem Kassenzettel', type: 'select', options: SATZ.concat([{ v: 'mix', l: 'beides: 19 % und 7 %' }]), required: true, showIf: hasVst('ausgabe') },
         { key: 'b19', label: 'davon mit 19 %', type: 'money', showIf: (v) => hasVst('ausgabe')(v) && v.satz === 'mix' },
         { key: 'b7', label: 'davon mit 7 %', type: 'money', showIf: (v) => hasVst('ausgabe')(v) && v.satz === 'mix' },
-        { key: 'eigenbeleg', label: 'Kein Beleg vorhanden (Eigenbeleg)', type: 'check' },
+        { key: 'eigenbeleg', label: 'Ich habe keinen Kassenzettel dafür', type: 'check' },
         { key: 'empfaenger', label: 'Empfänger (wer hat das Geld bekommen?)', type: 'text', required: true, showIf: (v) => v.eigenbeleg },
         { key: 'ohnegrund', label: 'Warum gibt es keinen Beleg?', type: 'text', required: true, placeholder: 'z. B. Parkautomat ohne Quittung', showIf: (v) => v.eigenbeleg }
       ]
     },
     einnahme: {
-      title: { manual: 'Sonstige Einnahme' },
+      title: { manual: 'Geld in die Kasse' },
       fields: [
         { key: 'datum', label: 'Datum', type: 'date' },
-        { key: 'art', label: 'Art der Einnahme', type: 'select', options: artOpts('einnahme'), required: true },
-        { key: 'text', label: 'Wofür / von wem', type: 'text', placeholder: 'z. B. Wechselgeld Sparkasse', required: true },
+        { key: 'art', label: 'Woher?', type: 'select', options: artOpts('einnahme'), required: true },
+        { key: 'text', label: 'Kurze Beschreibung', type: 'text', placeholder: 'z. B. Wechselgeld Sparkasse', required: true },
         { key: 'betrag', label: 'Betrag (brutto)', type: 'money', required: true },
         { key: 'satz', label: 'Steuersatz', type: 'select', options: SATZ, required: true, showIf: hasVst('einnahme') }
       ]
@@ -284,7 +285,7 @@
     },
     storno: {
       title: { manual: 'Buchung stornieren' },
-      fields: [{ key: 'grund', label: 'Grund für das Storno', type: 'text', placeholder: 'z. B. Betrag falsch erfasst', required: true }]
+      fields: [{ key: 'grund', label: 'Was war falsch?', type: 'text', placeholder: 'z. B. Betrag falsch eingetippt', required: true }]
     },
     start: {
       title: { edit: 'Kassenbuch einrichten' },
@@ -310,13 +311,13 @@
     const flagged = opts.flagged || {};
     const locked = entry.typ === 'start' && ENTRIES.length > 0;
     let hint = '';
-    if (entry.typ === 'start') hint = locked ? 'Der Anfangsbestand ist festgelegt, weil schon gebucht wurde. Nur der Name lässt sich noch ändern.'
-      : 'Wie viel Bargeld lag in der Kasse, bevor die erste Buchung kam? Am besten nachzählen. Kann nach der ersten Buchung nicht mehr geändert werden.';
-    else if (entry.typ === 'zbon') hint = opts.mode === 'scan' ? 'Werte mit dem Bon vergleichen. Leere Felder zählen als 0. Nach dem Speichern ist die Buchung unveränderlich.' : 'Leere Felder zählen als 0. Beträge brutto, wie auf dem Bon.';
-    else if (entry.typ === 'zaehlung') hint = 'Das gesamte Bargeld in der Kasse zählen. Weicht es vom Kassenbestand laut Buchungen ab, wird die Differenz gebucht.';
-    else if (entry.typ === 'storno') hint = 'Die Buchung bleibt im Kassenbuch sichtbar und wird durch eine Gegenbuchung aufgehoben.';
+    if (entry.typ === 'start') hint = locked ? 'Der Anfangsbestand ist fest. Die übrigen Angaben lassen sich ändern.'
+      : 'Einmal das Bargeld in der Kasse zählen und eintragen.';
+    else if (entry.typ === 'zbon') hint = opts.mode === 'scan' ? 'Bitte kurz mit dem Bon vergleichen.' : 'Beträge wie auf dem Bon. Leere Felder zählen als 0.';
+    else if (entry.typ === 'zaehlung') hint = 'Alles Bargeld in der Kasse zählen und eintragen.';
+    else if (entry.typ === 'storno') hint = 'Die alte Buchung bleibt sichtbar und wird aufgehoben.';
     else if (opts.mode === 'scan') hint = Object.keys(flagged).length ? 'Orange markierte Felder bitte prüfen.' : 'Stimmt alles? Dann speichern.';
-    if (opts.korrekturVon) hint = 'Die alte Buchung wurde storniert. Hier die richtigen Werte eintragen.';
+    if (opts.korrekturVon) hint = 'Die alte Buchung ist gestrichen. Jetzt die richtigen Werte eintragen.';
     $('editorHint').textContent = hint;
 
     const box = $('fields');
@@ -353,6 +354,15 @@
       if (flagged[f.key]) wrap.appendChild(el('div', 'note', flagged[f.key]));
       box.appendChild(wrap);
     }
+    // Selten gebrauchte Felder hinter „Weitere Felder“
+    const moreF = form.fields.filter((f) => f.more);
+    if (moreF.length) {
+      const b = el('button', 'link muted more-btn', 'Weitere Felder: ' + moreF.map((f) => f.label.replace(/ \(.*\)$/, '')).join(', '));
+      b.type = 'button';
+      b.addEventListener('click', () => { editing.showMore = true; b.hidden = true; updateVisibility(); });
+      box.appendChild(b);
+      b.hidden = moreF.every((f) => filled(entry[f.key]));
+    }
     updateVisibility();
     updateCalc();
     const raw = $('rawBox');
@@ -383,7 +393,8 @@
     }
     return out;
   }
-  const isShown = (f, vals) => !f.showIf || f.showIf(vals);
+  const filled = (v) => v !== null && v !== undefined && v !== '' && v !== false;
+  const isShown = (f, vals) => (!f.more || (editing && editing.showMore) || filled(vals[f.key])) && (!f.showIf || f.showIf(vals));
   function updateVisibility() {
     if (!editing) return;
     const vals = formValues();
@@ -513,7 +524,7 @@
       const e = await book(out, opts.photo);
       closeEditor();
       await reload();
-      toast('Gebucht als Beleg ' + K.belegNr(e));
+      toast('Gespeichert ✓');
     } finally { saving = false; }
   }
 
@@ -534,12 +545,12 @@
     const e = await book(s);
     closeEditor();
     await reload();
-    toast('Beleg ' + K.belegNr(target) + ' storniert (Beleg ' + K.belegNr(e) + ')');
+    toast('Buchung gestrichen');
     if (then === 'fix') {
       const copy = {};
       for (const k of ['typ', 'datum', 'text', 'betrag', 'art', 'satz', 'b19', 'b7', 'znr', 'eigenbeleg', 'empfaenger', 'ohnegrund'].concat(K.ZBON.map((f) => f.key))) if (target[k] !== undefined) copy[k] = target[k];
       if (K.checkDate(copy.datum, CLOSED, todayIso())) copy.datum = todayIso();
-      openEditor(copy, { mode: 'manual', korrekturVon: target.nr, title: 'Korrektur zu Beleg ' + K.belegNr(target) });
+      openEditor(copy, { mode: 'manual', korrekturVon: target.nr, title: 'Richtige Werte eintragen' });
     }
   }
 
@@ -587,7 +598,6 @@
       row(l.text.replace(/^Kassenabrechnung (#\d+ )?/, '') + (l.satz ? ' · ' + (l.vst ? 'VSt' : 'USt') + ' ' + eur(l.ust) : ''), (a > 0 ? '+' : '') + eur(a));
     }
     const locked = !!K.checkDate(e.datum, CLOSED, todayIso()) && e.datum <= todayIso();
-    row('Prüfsumme', (e.hash || '').slice(0, 16) + '…', 'mono');
 
     const img = $('detailFoto');
     img.hidden = true;
@@ -600,8 +610,8 @@
     $('detailStorno').hidden = !canStorno;
     $('detailFix').hidden = !canStorno || e.typ === 'zaehlung';
     $('detailLock').hidden = !locked || !canStorno;
-    $('detailStorno').onclick = () => { closeDetail(); openEditor({ typ: 'storno' }, { mode: 'manual', target: e, then: 'only', title: 'Beleg ' + K.belegNr(e) + ' stornieren' }); };
-    $('detailFix').onclick = () => { closeDetail(); openEditor({ typ: 'storno' }, { mode: 'manual', target: e, then: 'fix', title: 'Beleg ' + K.belegNr(e) + ' korrigieren' }); };
+    $('detailStorno').onclick = () => { closeDetail(); openEditor({ typ: 'storno' }, { mode: 'manual', target: e, then: 'only', title: 'Buchung streichen' }); };
+    $('detailFix').onclick = () => { closeDetail(); openEditor({ typ: 'storno' }, { mode: 'manual', target: e, then: 'fix', title: 'Fehler korrigieren' }); };
     $('detail').hidden = false;
   }
   function closeDetail() { $('detail').hidden = true; }
@@ -744,22 +754,22 @@
     months.sort().reverse();
     if (!months.length) { toast('Noch keine Buchungen'); return; }
     const pick = (m) => () => {
-      const opts = [
-        { label: 'Kassenbuch (PDF)', sub: 'Mit Belegverzeichnis und Prüfsumme', run: () => exportPdf(m, false) },
-        { label: 'Kassenbuch mit Belegfotos (PDF)', sub: 'Zusätzlich jedes gespeicherte Bonfoto als eigene Seite', run: () => exportPdf(m, true) },
+      const opts = [];
+      if (m && closable.indexOf(m) >= 0) opts.push({ label: 'Monat abschließen', sub: 'Am Monatsende einmal machen. Danach ist der Monat fest.', run: () => closeMonth(m) });
+      opts.push({ label: 'Kassenbuch als PDF', sub: 'Zum Ausdrucken oder für den Steuerberater', run: () => exportPdf(m, false) });
+      opts.push({ label: 'Mehr …', sub: 'PDF mit Bonfotos, Excel-Tabelle', run: () => choose(m ? K.monthLabel(m) : 'Alle Buchungen', '', [
+        { label: 'PDF mit Bonfotos', sub: 'Jedes Bonfoto als eigene Seite', run: () => exportPdf(m, true) },
         { label: 'Excel-Tabelle', sub: 'Zum Weiterrechnen', run: () => exportExcel(m) }
-      ];
-      if (m && closable.indexOf(m) >= 0) opts.unshift({ label: 'Monat abschließen (festschreiben)', sub: 'Danach keine Buchungen mehr in diesem Monat möglich', run: () => closeMonth(m) });
-      const st = m ? (isClosed(m) ? 'festgeschrieben 🔒' : 'noch offen') : '';
-      choose(m ? 'Kassenbuch ' + K.monthLabel(m) : 'Kassenbuch gesamt', st, opts);
+      ]) });
+      choose(m ? K.monthLabel(m) : 'Alle Buchungen', m ? (isClosed(m) ? 'abgeschlossen 🔒' : closable.indexOf(m) >= 0 ? 'noch nicht abgeschlossen' : 'laufender Monat') : '', opts);
     };
-    const sicherung = [
-      { label: 'Datensicherung (alle Daten)', sub: 'ZIP mit Buchungsjournal (CSV), allen Daten, Belegfotos und Prüfsummen', run: backup },
-      { label: 'Prüfsumme senden (Nachweis)', sub: 'Aktuellen Stand z. B. per Mail an den Steuerberater schicken', run: shareHash }
-    ];
-    const opts = months.map((m) => ({ label: K.monthLabel(m) + (isClosed(m) ? ' 🔒' : ''), sub: isClosed(m) ? 'festgeschrieben' : (closable.indexOf(m) >= 0 ? 'kann abgeschlossen werden' : 'laufender Monat'), run: pick(m) }));
-    opts.push({ label: 'Alle Buchungen', sub: 'Vom Anfangsbestand bis heute', run: pick(null) });
-    choose('Kassenbuch', 'Für welchen Monat?', opts.concat(sicherung));
+    const opts = months.map((m) => ({ label: K.monthLabel(m) + (isClosed(m) ? ' 🔒' : ''), run: pick(m) }));
+    opts.push({ label: 'Sichern und Steuerberater', sub: 'Datensicherung, Prüfsumme, alle Buchungen', run: () => choose('Sichern und Steuerberater', '', [
+      { label: 'Datensicherung', sub: 'Alle Daten und Fotos als Datei – z. B. per Mail an euch selbst schicken', run: backup },
+      { label: 'Prüfsumme senden', sub: 'Kurzer Nachweis des aktuellen Stands, z. B. an den Steuerberater', run: shareHash },
+      { label: 'Alle Buchungen', sub: 'Kassenbuch vom Anfang bis heute', run: pick(null) }
+    ]) });
+    choose('Kassenbuch', 'Welcher Monat?', opts);
   }
   const isClosed = (m) => !!(CLOSED[m] || (K.closedUntil(CLOSED) && m <= K.closedUntil(CLOSED)));
 
@@ -767,16 +777,16 @@
     if (!CHAIN.ok) { toast('Prüfsummen sind fehlerhaft – Abschluss nicht möglich'); return; }
     const earlier = K.closableMonths(ENTRIES, START, CLOSED, todayIso()).filter((x) => x <= m);
     const names = earlier.map(K.monthLabel).join(', ');
-    if (!confirm('Abschließen: ' + names + '.\n\nDanach sind in diesen Monaten keine Buchungen und Stornos mehr möglich. Korrekturen werden dann im laufenden Monat gebucht. Fortfahren?')) return;
+    if (!confirm(names + ' abschließen?\n\nDanach kann in diesem Monat nichts mehr gebucht oder geändert werden. Bitte vorher prüfen, ob alle Kassenabrechnungen drin sind.')) return;
     const info = { am: new Date().toISOString(), hash: K.lastHash(ENTRIES), bisNr: K.nextNr(ENTRIES) - 1 };
     for (const x of earlier) CLOSED[x] = info;
     await setSetting('festgeschrieben', CLOSED);
     for (const x of earlier) await log(K.monthLabel(x) + ' festgeschrieben (bis Beleg ' + String(info.bisNr).padStart(4, '0') + ')', x);
     await reload();
-    toast(names + ' festgeschrieben 🔒', 3500);
-    choose('Kassenbuch ' + K.monthLabel(m), 'festgeschrieben 🔒', [
-      { label: 'Kassenbuch (PDF)', sub: 'Jetzt mit Vermerk „festgeschrieben“', run: () => exportPdf(m, false) },
-      { label: 'Kassenbuch mit Belegfotos (PDF)', run: () => exportPdf(m, true) }
+    toast(names + ' abgeschlossen 🔒', 3500);
+    choose(K.monthLabel(m) + ' abgeschlossen 🔒', 'Jetzt das Kassenbuch an den Steuerberater schicken:', [
+      { label: 'Kassenbuch als PDF', run: () => exportPdf(m, false) },
+      { label: 'PDF mit Bonfotos', run: () => exportPdf(m, true) }
     ]);
   }
 
@@ -936,12 +946,12 @@
     $('camZbon').addEventListener('change', pick('zbon'));
     $('galleryInput').addEventListener('change', pick('zbon'));
     document.querySelector('label[for=camZbon]').addEventListener('click', needStart(() => {}));
-    $('galleryBtn').addEventListener('click', needStart(() => $('galleryInput').click()));
-    $('manualBtn').addEventListener('click', needStart(() => choose('Von Hand eintragen', '', [
-      { label: 'Kassenabrechnung', sub: 'Umsätze, EC, Gutscheine vom Bon abtippen', run: () => openEditor({ typ: 'zbon', datum: todayIso() }, { mode: 'manual' }) },
-      { label: 'Ausgabe', sub: 'Einkauf, Bankeinzahlung, Entnahme ohne Bon …', run: () => openEditor({ typ: 'ausgabe', datum: todayIso() }, { mode: 'manual' }) },
-      { label: 'Sonstige Einnahme', sub: 'Privateinlage, Wechselgeld von der Bank …', run: () => openEditor({ typ: 'einnahme', datum: todayIso() }, { mode: 'manual' }) },
-      { label: 'Kassensturz', sub: 'Bargeld zählen und mit dem Kassenbuch abgleichen', run: () => openEditor({ typ: 'zaehlung', datum: todayIso() }, { mode: 'manual' }) }
+    $('manualBtn').addEventListener('click', needStart(() => choose('Eintragen', 'Was ist passiert?', [
+      { label: 'Geld aus der Kasse genommen', sub: 'Einkauf bezahlt, zur Bank gebracht, privat entnommen', run: () => openEditor({ typ: 'ausgabe', datum: todayIso() }, { mode: 'manual' }) },
+      { label: 'Geld in die Kasse gelegt', sub: 'Wechselgeld von der Bank, Privateinlage', run: () => openEditor({ typ: 'einnahme', datum: todayIso() }, { mode: 'manual' }) },
+      { label: 'Kasse gezählt', sub: 'Bargeld zählen und vergleichen (Kassensturz)', run: () => openEditor({ typ: 'zaehlung', datum: todayIso() }, { mode: 'manual' }) },
+      { label: 'Kassenabrechnung aus der Galerie', sub: 'Ein schon gemachtes Foto verwenden', run: () => $('galleryInput').click() },
+      { label: 'Kassenabrechnung abtippen', sub: 'Wenn das Foto nicht klappt', run: () => openEditor({ typ: 'zbon', datum: todayIso() }, { mode: 'manual' }) }
     ])));
     $('exportBtn').addEventListener('click', exportMenu);
     $('rawBtn').addEventListener('click', () => { $('rawBox').hidden = !$('rawBox').hidden; });

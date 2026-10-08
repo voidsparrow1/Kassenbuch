@@ -18,14 +18,14 @@
   // Art der Buchung (ohne Kontonummern). vst: Steuersatz/Vorsteuer wird abgefragt
   const ARTEN = {
     ausgabe: [
-      { key: 'ware', label: 'Wareneinkauf', kurz: 'Ware', vst: true },
-      { key: 'betrieb', label: 'Sonstige Betriebsausgabe', kurz: 'Betriebsausg.', vst: true },
-      { key: 'transit_bank', label: 'Geldtransit zur Bank (Einzahlung aufs Konto)', kurz: 'Geldtransit' },
-      { key: 'privat_ent', label: 'Privatentnahme', kurz: 'Privat' }
+      { key: 'ware', label: 'Ware eingekauft (z. B. Metro)', kurz: 'Ware', vst: true },
+      { key: 'betrieb', label: 'Sonstiges fürs Geschäft bezahlt', kurz: 'Betriebsausg.', vst: true },
+      { key: 'transit_bank', label: 'Zur Bank gebracht', kurz: 'Geldtransit' },
+      { key: 'privat_ent', label: 'Privat entnommen', kurz: 'Privat' }
     ],
     einnahme: [
-      { key: 'transit_kasse', label: 'Geldtransit von der Bank (z. B. Wechselgeld)', kurz: 'Geldtransit' },
-      { key: 'privat_ein', label: 'Privateinlage', kurz: 'Privat' },
+      { key: 'transit_kasse', label: 'Von der Bank geholt (z. B. Wechselgeld)', kurz: 'Geldtransit' },
+      { key: 'privat_ein', label: 'Privat eingelegt', kurz: 'Privat' },
       { key: 'sonst', label: 'Sonstige Einnahme', kurz: 'Sonstige', vst: true }
     ]
   };
