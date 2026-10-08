@@ -5,7 +5,7 @@
   const K = window.Kassenbuch;
   const $ = (id) => document.getElementById(id);
 
-  const APP_VERSION = 11;   // sichtbar unten in der Liste – zum Prüfen, ob ein Update angekommen ist
+  const APP_VERSION = 12;   // sichtbar unten in der Liste – zum Prüfen, ob ein Update angekommen ist
   const USE_SW = 'serviceWorker' in navigator && !/[?&]nosw\b/.test(location.search);
   const abs = (p) => new URL(p, location.href).href;
 
@@ -186,7 +186,8 @@
       title: { edit: 'Kassenbestand zu Beginn' },
       fields: [
         { key: 'datum', label: 'Stand vom', type: 'date' },
-        { key: 'betrag', label: 'Bargeld in der Kasse', type: 'money', allowZero: true }
+        { key: 'betrag', label: 'Bargeld in der Kasse', type: 'money', allowZero: true },
+        { key: 'firma', label: 'Name des Geschäfts (steht oben im Kassenbuch)', type: 'text', placeholder: 'optional' }
       ]
     }
   };
@@ -305,7 +306,7 @@
     if (!ok) return;
 
     if (typ === 'start') {
-      await setSetting('anfangsbestand', { datum: out.datum, betrag: out.betrag || 0 });
+      await setSetting('anfangsbestand', { datum: out.datum, betrag: out.betrag || 0, firma: out.firma || '' });
     } else {
       delete out.haendler;
       if (!out.erstellt) out.erstellt = new Date().toISOString();
@@ -317,7 +318,7 @@
   }
 
   function openStart() {
-    openEditor({ typ: 'start', datum: START ? START.datum : todayIso(), betrag: START ? START.betrag : null }, { mode: 'edit' });
+    openEditor({ typ: 'start', datum: START ? START.datum : todayIso(), betrag: START ? START.betrag : null, firma: START ? START.firma : '' }, { mode: 'edit' });
   }
 
   // ---------- Auswahl-Blatt ----------
@@ -439,31 +440,46 @@
     openEditor(entry, Object.assign({ mode: 'scan', flagged: flagged, ocrText: text }, extra));
   }
 
-  // ---------- Excel ----------
+  // ---------- Kassenbuch (PDF) und Excel ----------
   function exportMenu() {
-    if (!ENTRIES.length) { toast('Noch keine Einträge zum Exportieren'); return; }
+    if (!ENTRIES.length) { toast('Noch keine Einträge'); return; }
     if (!START) { toast('Bitte zuerst den Kassenbestand zu Beginn eintragen'); openStart(); return; }
-    const opts = K.months(ENTRIES).map((m) => ({ label: K.monthLabel(m), run: () => exportExcel(m) }));
-    opts.push({ label: 'Alle Einträge', sub: 'Vom Anfangsbestand bis heute', run: () => exportExcel(null) });
-    choose('Excel erstellen', 'Für welchen Zeitraum?', opts);
+    const pick = (m, label) => () => choose(label, 'Wie soll es aussehen?', [
+      { label: 'Kassenbuch (PDF)', sub: 'Fertig zum Ausdrucken oder für den Steuerberater', run: () => exportPdf(m) },
+      { label: 'Excel-Tabelle', sub: 'Zum Weiterrechnen', run: () => exportExcel(m) }
+    ]);
+    const opts = K.months(ENTRIES).map((m) => ({ label: K.monthLabel(m), run: pick(m, 'Kassenbuch ' + K.monthLabel(m)) }));
+    opts.push({ label: 'Alle Einträge', sub: 'Vom Anfangsbestand bis heute', run: pick(null, 'Kassenbuch gesamt') });
+    choose('Kassenbuch erstellen', 'Für welchen Monat?', opts);
+  }
+
+  // Datei teilen; wo Teilen nicht geht (z. B. .xlsx in Chrome auf Android), herunterladen
+  async function deliver(blob, name, title) {
+    const file = new File([blob], name, { type: blob.type });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try { await navigator.share({ files: [file], title: title }); return; }
+      catch (e) { if (e.name === 'AbortError') return; }
+    }
+    // Die Daten bleiben lange verfügbar, weil Chrome erst nach der Rückfrage „Datei herunterladen?“ wirklich liest.
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10 * 60 * 1000);
+    toast(title + ' erstellt – siehe Downloads', 4000);
+  }
+
+  async function exportPdf(month) {
+    const out = window.KassenbuchPdf.build(ENTRIES, START, month, { firma: START.firma || '' });
+    const blob = new Blob([out.bytes], { type: 'application/pdf' });
+    const name = (month ? 'Kassenbuch_' + month : 'Kassenbuch_gesamt_' + todayIso()) + '.pdf';
+    await deliver(blob, name, 'Kassenbuch ' + (month ? K.monthLabel(month) : 'gesamt'));
   }
 
   async function exportExcel(month) {
     const out = K.buildSheet(ENTRIES, START, month);
     const blob = window.XlsxLite.build(out.sheet);
     const name = (month ? 'Kassenbuch_' + month : 'Kassenbuch_gesamt_' + todayIso()) + '.xlsx';
-    const file = new File([blob], name, { type: blob.type });
-    if (navigator.canShare && navigator.canShare({ files: [file] })) {
-      try { await navigator.share({ files: [file], title: out.title }); return; }
-      catch (e) { if (e.name === 'AbortError') return; }
-    }
-    // Download (Android: Chrome teilt keine .xlsx-Dateien). Die Daten bleiben lange verfügbar,
-    // weil Chrome erst nach der Rückfrage „Datei herunterladen?“ wirklich liest.
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob); a.download = name;
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 10 * 60 * 1000);
-    toast(out.title + ' erstellt – siehe Downloads', 4000);
+    await deliver(blob, name, out.title);
   }
 
   // ---------- Start / Offline-Einrichtung ----------
