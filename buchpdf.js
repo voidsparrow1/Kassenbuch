@@ -5,7 +5,7 @@
   const K = root.Kassenbuch || (typeof require !== 'undefined' ? require('./kassenbuch.js') : null);
   const PdfLite = root.PdfLite || (typeof require !== 'undefined' ? require('./pdf.js') : null);
 
-  const pad = function (v) { return String(v).padStart(2, '0'); };
+  const pad = function (v, len) { return String(v).padStart(len || 2, '0'); };
   const de = function (iso) { return iso ? iso.split('-').reverse().join('.') : ''; };
   function money(c) {
     if (c === null || c === undefined) return '';
@@ -30,26 +30,59 @@
   };
   const ROW = 15, TOP = 112, BOTTOM = 540;
 
+  // Zeilen fürs Belegverzeichnis: jede Buchung des Zeitraums mit Erfassungszeit und Hinweisen
+  function registerRows(inPeriod, all, opts) {
+    const sm = K.stornoMap(all);
+    const byNr = {};
+    for (const e of all) byNr[e.nr] = e;
+    const ts = function (iso) {
+      if (!iso) return '';
+      const d = new Date(iso);
+      return pad(d.getDate()) + '.' + pad(d.getMonth() + 1) + '.' + d.getFullYear() + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+    };
+    const out = inPeriod.slice().sort(function (a, b) { return (a.nr || 0) - (b.nr || 0); }).map(function (e) {
+      const h = [];
+      let warn = false;
+      if (e.typ === 'storno') h.push('Storno zu Beleg ' + pad(e.ref, 4) + ' – Grund: ' + (e.grund || ''));
+      if (sm[e.nr]) { h.push('storniert durch Beleg ' + pad(sm[e.nr].nr, 4)); }
+      if (e.korrektur_von) h.push('Korrektur zu Beleg ' + pad(e.korrektur_von, 4));
+      if (e.typ === 'zaehlung') { const d = (e.ist || 0) - (e.soll || 0); h.push(d ? 'Differenz ' + money(d) + ' €' : 'kein Unterschied'); if (d) warn = true; }
+      if (e.nachtraeglich) { h.push('nachträglich erfasst'); warn = true; }
+      if (e.fotoHash) h.push('Foto gespeichert');
+      if (e.text && /kassendifferenz/i.test(e.text)) { warn = true; h.push('Kassendifferenz aus Kassensturz'); }
+      return { beleg: K.belegNr(e), art: K.TYP_NAME[e.typ] || e.typ, datum: de(e.datum), erfasst: ts(e.erfasst), hinweis: h.join(' · '), warn: warn };
+    });
+    for (const ev of opts.protokoll || []) {
+      out.push({ beleg: '–', art: 'Protokoll', datum: '', erfasst: ts(ev.am), hinweis: ev.text, warn: false });
+    }
+    if (!out.length) out.push({ beleg: '', art: '', datum: '', erfasst: '', hinweis: 'Keine Buchungen im Zeitraum.' });
+    return out;
+  }
+  function padN(v, n) { return String(v).padStart(n, '0'); }
+
   /* entries/start wie in der App; month '2026-10' oder null (alles).
-     opts: { firma, erstellt (Date) } → Uint8Array (PDF) */
+     opts: { firma, erstellt (Date), closed ({monat: {am, hash, bisNr}}), chain ({ok, count, last, at, grund}),
+             protokoll ([{am, text}]), fotos ([{nr, jpeg: Uint8Array, w, h}]) } */
   function build(entries, start, month, opts) {
     opts = opts || {};
     const sorted = K.sortEntries(entries);
     const from = month ? month + '-01' : null;
     const to = month ? lastDay(month) : null;
     let opening = start ? start.betrag || 0 : 0;
-    const rows = [];
+    const rows = [], inPeriod = [];
     for (const e of sorted) {
       if (from && (e.datum || '') < from) { opening += K.net(e); continue; }
       if (to && (e.datum || '') > to) continue;
-      const beleg = e.typ === 'zbon' ? 'KA ' + (e.datum || '').slice(8, 10) + '.' + (e.datum || '').slice(5, 7) + '.' : 'B-' + (e.id || '');
+      const beleg = K.belegNr(e) || ('B-' + (e.id || ''));
+      inPeriod.push(e);
       for (const l of K.lines(e)) rows.push(Object.assign({ beleg: beleg }, l));
     }
 
     const period = month ? K.monthLabel(month) : 'Gesamtzeitraum';
     const doc = new PdfLite.Doc({ landscape: true, title: 'Kassenbuch ' + period });
     const now = opts.erstellt || new Date();
-    const stamp = de(now.getFullYear() + '-' + pad(now.getMonth() + 1) + '-' + pad(now.getDate())) + ' ' + pad(now.getHours()) + ':' + pad(now.getMinutes());
+    const stampOf = function (d) { return de(d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate())) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()); };
+    const stamp = stampOf(now);
 
     // Seiten vorab aufteilen, damit "Seite x von y" stimmt
     const perPage = Math.floor((BOTTOM - TOP - 2 * ROW) / ROW);   // Platz für Übertrag oben + Seitensumme unten
@@ -59,19 +92,29 @@
     if (!chunks.length) chunks.push([]);
     const lastRowsY = TOP + (chunks[chunks.length - 1].length + 2) * ROW;
     const summaryOwnPage = lastRowsY + SUMMARY_H > BOTTOM + 40;
-    const total = chunks.length + (summaryOwnPage ? 1 : 0);
+    // Anhang: Belegverzeichnis/Protokoll (eigene Seiten) und optional Belegfotos
+    const reg = registerRows(inPeriod, entries, opts);
+    const REG_PER_PAGE = Math.floor((BOTTOM - TOP - 4 * ROW) / ROW);
+    const regPages = Math.max(1, Math.ceil(reg.length / REG_PER_PAGE));
+    const fotos = (opts.fotos || []).filter(function (f) { return inPeriod.some(function (e) { return e.nr === f.nr; }); });
+    const total = chunks.length + (summaryOwnPage ? 1 : 0) + regPages + fotos.length;
 
+    const closedInfo = month && opts.closed && opts.closed[month];
+    const status = !month ? 'Auszug, nicht festgeschrieben'
+      : closedInfo ? 'Festgeschrieben am ' + stampOf(new Date(closedInfo.am)) : 'VORLÄUFIG – Monat noch nicht abgeschlossen';
     let bal = opening, nr = 0, sumEin = 0, sumAus = 0;
     const u = { 19: { brutto: 0, ust: 0 }, 7: { brutto: 0, ust: 0 }, 0: { brutto: 0, ust: 0 } };
 
-    function header(pageNo) {
-      doc.addPage();
+    function header(pageNo, noCols) {
+      doc.addPage({ landscape: true });
       doc.text(L, 46, 'Kassenbuch', { size: 18, bold: true });
       if (opts.firma) doc.text(L + 112, 46, opts.firma, { size: 12, maxWidth: 400 });
       doc.text(R, 40, period, { size: 12, bold: true, align: 'right' });
       doc.text(R, 54, 'Seite ' + pageNo + ' von ' + total, { size: 8.5, align: 'right', gray: 0.35 });
       const z = month ? de(from) + ' – ' + de(to) : '';
       if (z) doc.text(L, 62, 'Zeitraum ' + z, { size: 8.5, gray: 0.35 });
+      doc.text(R, 66, status, { size: 8.5, bold: !closedInfo, align: 'right', gray: closedInfo ? 0.2 : 0 });
+      if (noCols) return;
       doc.rect(L, 74, R - L, 18, { fill: 0.9 });
       for (const k in COL) {
         const c = COL[k];
@@ -105,6 +148,7 @@
         doc.text(COL.text.x, y, r.text, { size: 8.5, maxWidth: COL.text.w });
         if (r.ein) doc.text(COL.ein.x, y, money(r.ein), { size: 8.5, align: 'right' });
         if (r.aus) doc.text(COL.aus.x, y, money(r.aus), { size: 8.5, align: 'right' });
+        if (r.storno) doc.line(COL.text.x, y + 2.5, COL.text.x + 34, y + 2.5, { width: 0.4, gray: 0.5 });
         if (r.satz !== null && r.satz !== undefined) doc.text(COL.satz.x, y, r.satz + ' %', { size: 8.5, align: 'right' });
         if (r.satz) doc.text(COL.ust.x, y, money(r.ust), { size: 8.5, align: 'right' });
         doc.text(COL.bestand.x, y, money(bal), { size: 8.5, align: 'right', bold: bal < 0 });
@@ -121,9 +165,64 @@
       footer();
       if (pi === chunks.length - 1) summary(summaryOwnPage ? null : y + 34);
     });
+    let pageNo = chunks.length + (summaryOwnPage ? 1 : 0);
+    register();
+    fotos.forEach(foto);
+
+    function register() {
+      const RC = { beleg: L + 4, art: L + 52, datum: L + 140, erfasst: L + 206, hinweis: L + 300 };
+      for (let p = 0; p < regPages; p++) {
+        pageNo++;
+        header(pageNo, true);
+        doc.text(L, 86, 'Belegverzeichnis und Protokoll', { size: 10, bold: true });
+        let y = TOP;
+        doc.rect(L, y - 11, R - L, 15, { fill: 0.93 });
+        doc.text(RC.beleg, y, 'Beleg', { size: 8, bold: true });
+        doc.text(RC.art, y, 'Art', { size: 8, bold: true });
+        doc.text(RC.datum, y, 'Buchungsdatum', { size: 8, bold: true });
+        doc.text(RC.erfasst, y, 'Erfasst am', { size: 8, bold: true });
+        doc.text(RC.hinweis, y, 'Hinweise', { size: 8, bold: true });
+        y += ROW;
+        reg.slice(p * REG_PER_PAGE, (p + 1) * REG_PER_PAGE).forEach(function (r) {
+          doc.text(RC.beleg, y, r.beleg, { size: 8 });
+          doc.text(RC.art, y, r.art, { size: 8, maxWidth: 84 });
+          doc.text(RC.datum, y, r.datum, { size: 8 });
+          doc.text(RC.erfasst, y, r.erfasst, { size: 8 });
+          doc.text(RC.hinweis, y, r.hinweis, { size: 8, maxWidth: R - RC.hinweis, gray: r.warn ? 0 : 0.25, bold: !!r.warn });
+          y += ROW;
+        });
+        if (p === regPages - 1) {
+          y += 8;
+          const ch = opts.chain;
+          doc.line(L, y - 10, R, y - 10, { width: 0.5 });
+          if (ch) {
+            doc.text(L + 4, y + 2, ch.ok ? 'Prüfsummen-Kette (SHA-256) über alle ' + ch.count + ' Buchungen: in Ordnung.'
+              : 'ACHTUNG: Prüfsummen-Kette unterbrochen bei Beleg ' + pad(ch.at || 0, 4) + ' (' + ch.grund + '). Daten wurden außerhalb der App verändert.',
+              { size: 8.5, bold: true });
+            if (ch.ok && ch.last) doc.text(L + 4, y + 14, 'Prüfsumme der letzten Buchung: ' + ch.last, { size: 7, gray: 0.3 });
+          }
+          if (closedInfo && closedInfo.hash) doc.text(L + 4, y + 26, 'Festgeschrieben bis Beleg ' + pad(closedInfo.bisNr || 0, 4) + ' mit Prüfsumme ' + closedInfo.hash, { size: 7, gray: 0.3 });
+          doc.text(L + 4, y + 42, 'Buchungen können nicht geändert oder gelöscht werden. Korrekturen erfolgen ausschließlich über Stornobuchungen mit Begründung.', { size: 7.5, gray: 0.35 });
+        }
+        footer();
+      }
+    }
+
+    function foto(f) {
+      pageNo++;
+      doc.addPage({ portrait: true });
+      const e = inPeriod.find(function (x) { return x.nr === f.nr; });
+      doc.text(36, 40, 'Beleg ' + pad(f.nr, 4) + ' – ' + (K.TYP_NAME[e.typ] || '') + ' vom ' + de(e.datum), { size: 11, bold: true });
+      doc.text(559, 40, 'Seite ' + pageNo + ' von ' + total, { size: 8, align: 'right', gray: 0.35 });
+      doc.text(36, 54, 'Foto gespeichert am ' + stampOf(new Date(e.erfasst || Date.now())) + (e.fotoHash ? ' · SHA-256 ' + e.fotoHash.slice(0, 32) + '…' : ''), { size: 7.5, gray: 0.35 });
+      const maxW = 523, maxH = 760;
+      const sc = Math.min(maxW / f.w, maxH / f.h);
+      const w = f.w * sc, h = f.h * sc;
+      doc.image(f.jpeg, f.w, f.h, 36 + (maxW - w) / 2, 66, w, h);
+    }
 
     function summary(y) {
-      if (y === null) { header(total); y = TOP; }
+      if (y === null) { header(chunks.length + 1); y = TOP; }
       const x1 = L, x2 = 300, x3 = 440, x4 = R;
       doc.rect(L, y - 12, R - L, 18, { fill: 0.9 });
       doc.text(L + 6, y + 1, 'Abschluss ' + period, { size: 10, bold: true });

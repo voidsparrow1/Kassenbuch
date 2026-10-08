@@ -79,7 +79,6 @@
         <button type="button" class="btn ghost" id="cancelBtn">Abbrechen</button>
         <button type="submit" class="btn primary">Speichern</button>
       </div>
-      <button type="button" class="link danger" id="deleteBtn" hidden>Eintrag löschen</button>
       <button type="button" class="link muted" id="rawBtn" hidden>Erkannten Text anzeigen</button>
       <div id="rawBox" class="raw" hidden>
         <div id="rawDiag" class="diag"></div>
@@ -87,6 +86,22 @@
         <button type="button" class="btn ghost full" id="rawCopy">Text kopieren</button>
       </div>
     </form>
+  </section>
+
+  <!-- Buchung ansehen (unveränderlich) -->
+  <section id="detail" class="overlay sheet" hidden>
+    <div class="card">
+      <h2 id="detailTitle"></h2>
+      <p id="detailSub" class="hint"></p>
+      <div id="detailBody" class="detail"></div>
+      <img id="detailFoto" class="foto" alt="Foto des Belegs" hidden>
+      <p id="detailLock" class="hint" hidden>Der Monat ist abgeschlossen. Ein Storno wird mit dem heutigen Datum gebucht.</p>
+      <div class="row">
+        <button type="button" class="btn ghost" id="detailClose">Schließen</button>
+        <button type="button" class="btn primary" id="detailFix">Korrigieren</button>
+      </div>
+      <button type="button" class="link danger" id="detailStorno">Nur stornieren</button>
+    </div>
   </section>
 
   <div id="toast" class="toast" role="status" hidden></div>

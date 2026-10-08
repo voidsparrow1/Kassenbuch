@@ -171,3 +171,15 @@ body {
 .diag-row { padding: 6px 0; border-top: 1px dashed var(--line); }
 .diag-role { display: block; font-weight: 600; color: var(--accent); }
 .diag-row code { font: 12px var(--mono); color: var(--muted); white-space: pre-wrap; word-break: break-word; }
+.warn.bad { background: var(--danger); color: #fff; }
+.entry.storniert .who, .entry.storniert .amt { text-decoration: line-through; color: var(--muted); }
+.entry.storno .amt, .entry.zaehlung .amt { color: var(--muted); }
+.entry.storno { border-style: dashed; }
+.detail { margin: 6px 0 12px; }
+.drow { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px dashed var(--line); font-size: 15px; }
+.drow span { color: var(--muted); }
+.drow b { text-align: right; font-family: var(--mono); font-weight: 600; }
+.drow.bad b, .drow.bad span { color: var(--danger); font-family: inherit; }
+.drow.mono b { font-size: 12px; color: var(--muted); }
+.foto { display: block; max-width: 100%; max-height: 50vh; margin: 0 auto 12px; border-radius: 8px; border: 1px solid var(--line); }
+.choice.danger b { color: var(--accent); }

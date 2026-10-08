@@ -39,13 +39,31 @@
 
   function Doc(opts) {
     opts = opts || {};
-    this.w = opts.landscape ? 842 : 595;
-    this.h = opts.landscape ? 595 : 842;
+    this.landscape = !!opts.landscape;
+    this.w = this.landscape ? 842 : 595;
+    this.h = this.landscape ? 595 : 842;
     this.pages = [];
+    this.images = [];
     this.cur = null;
     this.title = opts.title || '';
   }
-  Doc.prototype.addPage = function () { this.cur = []; this.pages.push(this.cur); return this; };
+  // o.portrait / o.landscape: Ausrichtung nur für diese Seite
+  Doc.prototype.addPage = function (o) {
+    o = o || {};
+    const land = o.landscape !== undefined ? o.landscape : (o.portrait ? false : this.landscape);
+    this.w = land ? 842 : 595; this.h = land ? 595 : 842;
+    this.cur = []; this.cur.w = this.w; this.cur.h = this.h; this.cur.imgs = [];
+    this.pages.push(this.cur);
+    return this;
+  };
+  // JPEG direkt einbetten (DCTDecode). jpeg: Uint8Array, pw/ph: Pixelmaße. Position/Größe in pt, y von oben.
+  Doc.prototype.image = function (jpeg, pw, ph, x, y, w, h) {
+    const id = this.images.length;
+    this.images.push({ data: jpeg, pw: pw, ph: ph });
+    this.cur.imgs.push(id);
+    this.cur.push('q ' + n(w) + ' 0 0 ' + n(h) + ' ' + n(x) + ' ' + n(this.h - y - h) + ' cm /Im' + id + ' Do Q');
+    return this;
+  };
   // y von oben gemessen (bequemer fürs Layout)
   Doc.prototype.text = function (x, y, str, o) {
     o = o || {};
@@ -79,35 +97,41 @@
     const offsets = [];
     let len = 0;
     const push = function (s) { const b = typeof s === 'string' ? enc.encode(s) : s; parts.push(b); len += b.length; };
-    const obj = function (id, body) { offsets[id] = len; push(id + ' 0 obj\n' + body + '\nendobj\n'); };
+    const begin = function (id) { offsets[id] = len; };
+    const obj = function (id, body) { begin(id); push(id + ' 0 obj\n' + body + '\nendobj\n'); };
 
     push('%PDF-1.4\n');
     push(new Uint8Array([37, 226, 227, 207, 211, 10]));
-    const nPages = this.pages.length;
-    // 1 Katalog, 2 Seitenbaum, 3/4 Schriften, 5 Info, ab 6: je Seite Page + Content
-    const pageIds = this.pages.map(function (_, i) { return 6 + i * 2; });
+    // Feste Objekte: 1 Katalog, 2 Seitenbaum, 3/4 Schriften, 5 Info; danach Bilder, dann je Seite Page + Content
+    let next = 6;
+    const imgIds = this.images.map(function () { return next++; });
+    const pageIds = this.pages.map(function () { const id = next; next += 2; return id; });
     obj(1, '<< /Type /Catalog /Pages 2 0 R >>');
-    obj(2, '<< /Type /Pages /Kids [' + pageIds.map(function (id) { return id + ' 0 R'; }).join(' ') + '] /Count ' + nPages + ' >>');
+    obj(2, '<< /Type /Pages /Kids [' + pageIds.map(function (id) { return id + ' 0 R'; }).join(' ') + '] /Count ' + this.pages.length + ' >>');
     obj(3, '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>');
     obj(4, '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>');
-    const t = Array.from(this.title, code);
-    obj(5, '<< /Title (' + esc(t) + ') /Producer (Kassenbuch-App) >>');
-    const self = this;
+    obj(5, '<< /Title (' + esc(Array.from(this.title, code)) + ') /Producer (Kassenbuch-App) >>');
+    this.images.forEach(function (im, i) {
+      begin(imgIds[i]);
+      push(imgIds[i] + ' 0 obj\n<< /Type /XObject /Subtype /Image /Width ' + im.pw + ' /Height ' + im.ph +
+        ' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ' + im.data.length + ' >>\nstream\n');
+      push(im.data);
+      push('\nendstream\nendobj\n');
+    });
     this.pages.forEach(function (ops, i) {
-      const content = ops.join('\n');
-      const cb = enc.encode(content);
-      obj(pageIds[i], '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ' + self.w + ' ' + self.h + '] ' +
-        '/Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ' + (pageIds[i] + 1) + ' 0 R >>');
-      offsets[pageIds[i] + 1] = len;
+      const cb = enc.encode(ops.join('\n'));
+      const xo = ops.imgs.length ? ' /XObject << ' + ops.imgs.map(function (k) { return '/Im' + k + ' ' + imgIds[k] + ' 0 R'; }).join(' ') + ' >>' : '';
+      obj(pageIds[i], '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ' + ops.w + ' ' + ops.h + '] ' +
+        '/Resources << /Font << /F1 3 0 R /F2 4 0 R >>' + xo + ' >> /Contents ' + (pageIds[i] + 1) + ' 0 R >>');
+      begin(pageIds[i] + 1);
       push((pageIds[i] + 1) + ' 0 obj\n<< /Length ' + cb.length + ' >>\nstream\n');
       push(cb);
       push('\nendstream\nendobj\n');
     });
-    const count = 6 + nPages * 2;
     const xref = len;
-    let x = 'xref\n0 ' + count + '\n0000000000 65535 f \n';
-    for (let i = 1; i < count; i++) x += String(offsets[i]).padStart(10, '0') + ' 00000 n \n';
-    push(x + 'trailer\n<< /Size ' + count + ' /Root 1 0 R /Info 5 0 R >>\nstartxref\n' + xref + '\n%%EOF\n');
+    let x = 'xref\n0 ' + next + '\n0000000000 65535 f \n';
+    for (let i = 1; i < next; i++) x += String(offsets[i]).padStart(10, '0') + ' 00000 n \n';
+    push(x + 'trailer\n<< /Size ' + next + ' /Root 1 0 R /Info 5 0 R >>\nstartxref\n' + xref + '\n%%EOF\n');
     const out = new Uint8Array(len);
     let o = 0;
     for (const p of parts) { out.set(p, o); o += p.length; }

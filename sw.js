@@ -1,6 +1,6 @@
 /* Service Worker: macht die App offline-fähig.
    Beim ersten Start (mit Internet) werden App und Texterkennung einmalig gespeichert. */
-const SHELL_CACHE = 'kassenbon-shell-v12';      // bei App-Änderungen hochzählen
+const SHELL_CACHE = 'kassenbon-shell-v13';      // bei App-Änderungen hochzählen
 const VENDOR_CACHE = 'kassenbon-vendor-tess510'; // nur bei neuer Tesseract-Version ändern
 
 const SHELL = [
