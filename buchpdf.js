@@ -21,11 +21,12 @@
     nr: { x: 58, align: 'right', title: 'Nr.' },
     datum: { x: 66, title: 'Datum' },
     beleg: { x: 122, title: 'Beleg' },
-    text: { x: 168, w: 262, title: 'Buchungstext' },
+    art: { x: 168, w: 64, title: 'Art' },
+    text: { x: 236, w: 212, title: 'Buchungstext' },
     ein: { x: 512, align: 'right', title: 'Einnahme €' },
     aus: { x: 590, align: 'right', title: 'Ausgabe €' },
     satz: { x: 632, align: 'right', title: 'USt %' },
-    ust: { x: 700, align: 'right', title: 'USt €' },
+    ust: { x: 700, align: 'right', title: 'USt/VSt €' },
     bestand: { x: R - 4, align: 'right', title: 'Bestand €' }
   };
   const ROW = 15, TOP = 112, BOTTOM = 540;
@@ -48,10 +49,22 @@
       if (e.korrektur_von) h.push('Korrektur zu Beleg ' + pad(e.korrektur_von, 4));
       if (e.typ === 'zaehlung') { const d = (e.ist || 0) - (e.soll || 0); h.push(d ? 'Differenz ' + money(d) + ' €' : 'kein Unterschied'); if (d) warn = true; }
       if (e.nachtraeglich) { h.push('nachträglich erfasst'); warn = true; }
+      if (e.znr) h.push('Abrechnung #' + e.znr);
+      if (e.eigenbeleg) { h.push('Eigenbeleg – Empfänger: ' + (e.empfaenger || '?') + ', ohne Beleg weil: ' + (e.ohnegrund || '?')); warn = true; }
+      if (e.typ === 'zaehlung' && e.grund) h.push('Grund: ' + e.grund);
       if (e.fotoHash) h.push('Foto gespeichert');
+      if (e.kassierer) h.push('erfasst von ' + e.kassierer);
       if (e.text && /kassendifferenz/i.test(e.text)) { warn = true; h.push('Kassendifferenz aus Kassensturz'); }
       return { beleg: K.belegNr(e), art: K.TYP_NAME[e.typ] || e.typ, datum: de(e.datum), erfasst: ts(e.erfasst), hinweis: h.join(' · '), warn: warn };
     });
+    const z = inPeriod.filter(function (e) { return e.typ === 'zbon' && e.znr; }).map(function (e) { return +e.znr; });
+    if (z.length) {
+      const lo = Math.min.apply(null, z), hi = Math.max.apply(null, z);
+      for (const g of K.znrGaps(all)) {
+        if (g[1] < lo - 1 || g[0] > hi + 1) continue;
+        out.push({ beleg: '–', art: 'Prüfung', datum: '', erfasst: '', hinweis: 'Lücke in den Abrechnungs-Nummern: ' + (g[0] === g[1] ? '#' + g[0] : '#' + g[0] + ' bis #' + g[1]) + ' fehlt', warn: true });
+      }
+    }
     for (const ev of opts.protokoll || []) {
       out.push({ beleg: '–', art: 'Protokoll', datum: '', erfasst: ts(ev.am), hinweis: ev.text, warn: false });
     }
@@ -86,7 +99,7 @@
 
     // Seiten vorab aufteilen, damit "Seite x von y" stimmt
     const perPage = Math.floor((BOTTOM - TOP - 2 * ROW) / ROW);   // Platz für Übertrag oben + Seitensumme unten
-    const SUMMARY_H = 150;
+    const SUMMARY_H = 220;
     const chunks = [];
     for (let i = 0; i < rows.length; i += perPage) chunks.push(rows.slice(i, i + perPage));
     if (!chunks.length) chunks.push([]);
@@ -103,7 +116,8 @@
     const status = !month ? 'Auszug, nicht festgeschrieben'
       : closedInfo ? 'Festgeschrieben am ' + stampOf(new Date(closedInfo.am)) : 'VORLÄUFIG – Monat noch nicht abgeschlossen';
     let bal = opening, nr = 0, sumEin = 0, sumAus = 0;
-    const u = { 19: { brutto: 0, ust: 0 }, 7: { brutto: 0, ust: 0 }, 0: { brutto: 0, ust: 0 } };
+    const u = { 19: { brutto: 0, ust: 0 }, 7: { brutto: 0, ust: 0 }, 0: { brutto: 0, ust: 0 } };   // Umsatzsteuer (Einnahmen)
+    const v = { 19: { brutto: 0, ust: 0 }, 7: { brutto: 0, ust: 0 }, 0: { brutto: 0, ust: 0 } };   // Vorsteuer (Ausgaben)
 
     function header(pageNo, noCols) {
       doc.addPage({ landscape: true });
@@ -112,7 +126,8 @@
       doc.text(R, 40, period, { size: 12, bold: true, align: 'right' });
       doc.text(R, 54, 'Seite ' + pageNo + ' von ' + total, { size: 8.5, align: 'right', gray: 0.35 });
       const z = month ? de(from) + ' – ' + de(to) : '';
-      if (z) doc.text(L, 62, 'Zeitraum ' + z, { size: 8.5, gray: 0.35 });
+      const kopf = [z ? 'Zeitraum ' + z : '', opts.anschrift || '', opts.steuernummer ? 'St.-Nr. ' + opts.steuernummer : ''].filter(Boolean).join('  ·  ');
+      if (kopf) doc.text(L, 62, kopf, { size: 8.5, gray: 0.35, maxWidth: 560 });
       doc.text(R, 66, status, { size: 8.5, bold: !closedInfo, align: 'right', gray: closedInfo ? 0.2 : 0 });
       if (noCols) return;
       doc.rect(L, 74, R - L, 18, { fill: 0.9 });
@@ -140,11 +155,14 @@
       chunk.forEach(function (r, i) {
         nr++;
         bal += r.ein - r.aus; sumEin += r.ein; sumAus += r.aus; pEin += r.ein; pAus += r.aus;
-        if (r.satz !== null && r.satz !== undefined && u[r.satz]) { u[r.satz].brutto += r.ein; u[r.satz].ust += r.ust; }
+        if (r.satz !== null && r.satz !== undefined && u[r.satz]) {
+          if (r.vst) { v[r.satz].brutto += r.aus; v[r.satz].ust += r.ust; } else { u[r.satz].brutto += r.ein; u[r.satz].ust += r.ust; }
+        }
         if (i % 2 === 1) doc.rect(L, y - 10.5, R - L, ROW, { fill: 0.965 });
         doc.text(COL.nr.x, y, nr, { size: 8.5, align: 'right', gray: 0.35 });
         doc.text(COL.datum.x, y, de(r.datum), { size: 8.5 });
         doc.text(COL.beleg.x, y, r.beleg, { size: 8.5, maxWidth: 44 });
+        doc.text(COL.art.x, y, r.art || '', { size: 7.5, maxWidth: COL.art.w, gray: 0.25 });
         doc.text(COL.text.x, y, r.text, { size: 8.5, maxWidth: COL.text.w });
         if (r.ein) doc.text(COL.ein.x, y, money(r.ein), { size: 8.5, align: 'right' });
         if (r.aus) doc.text(COL.aus.x, y, money(r.aus), { size: 8.5, align: 'right' });
@@ -222,7 +240,7 @@
     }
 
     function summary(y) {
-      if (y === null) { header(chunks.length + 1); y = TOP; }
+      if (y === null) { header(chunks.length + 1, true); y = TOP; }
       const x1 = L, x2 = 300, x3 = 440, x4 = R;
       doc.rect(L, y - 12, R - L, 18, { fill: 0.9 });
       doc.text(L + 6, y + 1, 'Abschluss ' + period, { size: 10, bold: true });
@@ -239,28 +257,33 @@
       doc.line(x1 + 6, y - 9, x2, y - 9, { width: 0.6 });
       kv('= Endbestand (Soll)', money(bal) + ' €', true);
 
-      // USt-Übersicht
+      // USt- und Vorsteuer-Übersicht
       let yy = yTop;
-      doc.text(x3, yy, 'Umsatzsteuer aus Kassenabrechnungen', { size: 9, bold: true }); yy += 14;
-      doc.text(x3, yy, 'Satz', { size: 8, gray: 0.35 });
-      doc.text(x3 + 150, yy, 'Umsatz brutto', { size: 8, gray: 0.35, align: 'right' });
-      doc.text(x3 + 230, yy, 'Netto', { size: 8, gray: 0.35, align: 'right' });
-      doc.text(x4 - 4, yy, 'USt', { size: 8, gray: 0.35, align: 'right' });
-      yy += 12;
-      [19, 7, 0].forEach(function (s) {
-        const b = u[s].brutto, t = u[s].ust;
-        doc.text(x3, yy, s + ' %', { size: 9 });
-        doc.text(x3 + 150, yy, money(b), { size: 9, align: 'right' });
-        doc.text(x3 + 230, yy, money(b - t), { size: 9, align: 'right' });
-        doc.text(x4 - 4, yy, money(t), { size: 9, align: 'right' });
-        yy += 13;
-      });
-      doc.line(x3, yy - 9, x4, yy - 9, { width: 0.6 });
-      const tb = u[19].brutto + u[7].brutto + u[0].brutto, tu = u[19].ust + u[7].ust;
-      doc.text(x3, yy, 'Summe', { size: 9, bold: true });
-      doc.text(x3 + 150, yy, money(tb), { size: 9, bold: true, align: 'right' });
-      doc.text(x3 + 230, yy, money(tb - tu), { size: 9, bold: true, align: 'right' });
-      doc.text(x4 - 4, yy, money(tu), { size: 9, bold: true, align: 'right' });
+      const table = function (title, t, colLabel) {
+        doc.text(x3, yy, title, { size: 9, bold: true }); yy += 14;
+        doc.text(x3, yy, 'Satz', { size: 8, gray: 0.35 });
+        doc.text(x3 + 150, yy, colLabel, { size: 8, gray: 0.35, align: 'right' });
+        doc.text(x3 + 230, yy, 'Netto', { size: 8, gray: 0.35, align: 'right' });
+        doc.text(x4 - 4, yy, title.indexOf('Vorsteuer') === 0 ? 'VSt' : 'USt', { size: 8, gray: 0.35, align: 'right' });
+        yy += 12;
+        [19, 7, 0].forEach(function (s) {
+          doc.text(x3, yy, s + ' %', { size: 9 });
+          doc.text(x3 + 150, yy, money(t[s].brutto), { size: 9, align: 'right' });
+          doc.text(x3 + 230, yy, money(t[s].brutto - t[s].ust), { size: 9, align: 'right' });
+          doc.text(x4 - 4, yy, money(t[s].ust), { size: 9, align: 'right' });
+          yy += 13;
+        });
+        doc.line(x3, yy - 9, x4, yy - 9, { width: 0.6 });
+        const tb = t[19].brutto + t[7].brutto + t[0].brutto, tu = t[19].ust + t[7].ust;
+        doc.text(x3, yy, 'Summe', { size: 9, bold: true });
+        doc.text(x3 + 150, yy, money(tb), { size: 9, bold: true, align: 'right' });
+        doc.text(x3 + 230, yy, money(tb - tu), { size: 9, bold: true, align: 'right' });
+        doc.text(x4 - 4, yy, money(tu), { size: 9, bold: true, align: 'right' });
+        yy += 20;
+      };
+      table('Umsatzsteuer aus Kassenabrechnungen und Einnahmen', u, 'Umsatz brutto');
+      table('Vorsteuer aus bar bezahlten Ausgaben', v, 'Ausgabe brutto');
+      yy -= 20;
 
       // Kassensturz und Unterschrift
       y = Math.max(y, yy) + 26;

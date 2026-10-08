@@ -413,6 +413,19 @@
     return res;
   }
 
+  // Fortlaufende Nummer der Kassenabrechnung: "#340", "Z-Bericht Nr. 0217", "Abrechnung Nr. 12"
+  function findZnr(lines) {
+    for (let i = 0; i < Math.min(lines.length, 8); i++) {
+      const m = lines[i].match(/(?:^|\s)#\s?(\d{1,6})\b/);
+      if (m) { trace(lines[i], 'Abrechnungs-Nr.: ' + m[1]); return parseInt(m[1], 10); }
+    }
+    for (const l of lines) {
+      const m = l.match(/\b(?:Z[\s-]?(?:Bericht|Bon|Abschluss|Nr)\w*|Abrechnung|Tagesabschluss|Bericht)\s*(?:Nr\.?\s?:?|#|:)\s*(\d{1,6})\b/i);
+      if (m) { trace(l, 'Abrechnungs-Nr.: ' + m[1]); return parseInt(m[1], 10); }
+    }
+    return null;
+  }
+
   function parseZBon(text) {
     TRACE = [];
     const lines = String(text || '').split(/\r?\n/).map(function (l) {
@@ -426,6 +439,7 @@
     if (u0 === null) u0 = findLine(lines, /gutschein\w*[\s\-:]*(?:verk|ausgabe|aufladung)|verk\w*[\s\-:]*gutschein/i);
     const out = {
       datum: findDate(text || ''),
+      znr: findZnr(lines),
       u19: rateGross(lines, 19),
       u7: rateGross(lines, 7),
       u0: u0,

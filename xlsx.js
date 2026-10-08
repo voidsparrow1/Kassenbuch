@@ -19,7 +19,7 @@
     return (c ^ 0xffffffff) >>> 0;
   }
 
-  function zip(files) { // files: [{name, data: Uint8Array}]
+  function zip(files, type) { // files: [{name, data: Uint8Array}]
     const enc = new TextEncoder();
     const now = new Date();
     const dosTime = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
@@ -51,7 +51,7 @@
     end.setUint32(0, 0x06054b50, true); end.setUint16(8, files.length, true); end.setUint16(10, files.length, true);
     end.setUint32(12, cdSize, true); end.setUint32(16, offset, true);
     return new Blob(chunks.concat(central, [new Uint8Array(end.buffer)]),
-      { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      { type: type || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
   }
 
   // ---------- Tabelle ----------
@@ -205,7 +205,7 @@
     return zip(files.map(function (f) { return { name: f[0], data: enc.encode(f[1]) }; }));
   }
 
-  const api = { build: build, colName: colName };
+  const api = { build: build, colName: colName, zip: zip };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.XlsxLite = api;
 })(this);

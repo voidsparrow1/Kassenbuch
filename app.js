@@ -7,7 +7,7 @@
   const K = window.Kassenbuch;
   const $ = (id) => document.getElementById(id);
 
-  const APP_VERSION = 13;   // sichtbar unten in der Liste – zum Prüfen, ob ein Update angekommen ist
+  const APP_VERSION = 14;   // sichtbar unten in der Liste – zum Prüfen, ob ein Update angekommen ist
   const LATE_DAYS = 10;     // ab so vielen Tagen Abstand gilt eine Buchung als nachträglich erfasst
   const USE_SW = 'serviceWorker' in navigator && !/[?&]nosw\b/.test(location.search);
   const abs = (p) => new URL(p, location.href).href;
@@ -90,11 +90,13 @@
   let START = null;   // { datum, betrag, firma } – Kassenbestand vor der ersten Buchung
   let CLOSED = {};    // { '2026-08': { am, hash, bisNr } } – festgeschriebene Monate
   let CHAIN = { ok: true, count: 0 };
+  let LAST_BACKUP;    // Zeitpunkt der letzten Datensicherung
 
   async function reload() {
     ENTRIES = (await allEntries()).map(K.normalize);
     START = await getSetting('anfangsbestand');
     CLOSED = (await getSetting('festgeschrieben')) || {};
+    LAST_BACKUP = (await getSetting('letzteSicherung')) || null;
     await migrate();
     CHAIN = await K.verifyChain(ENTRIES, sha);
     render();
@@ -121,6 +123,8 @@
     delete e.id;
     e.nr = K.nextNr(ENTRIES);
     e.erfasst = new Date().toISOString();
+    e.hv = K.HASH_VERSION;
+    if (START && START.kassierer) e.kassierer = START.kassierer;
     if (photo) {
       const bytes = new Uint8Array(await photo.blob.arrayBuffer());
       e.fotoHash = await shaBytes(bytes);
@@ -139,7 +143,7 @@
     let who, sub = '', amt;
     const nr = 'Beleg ' + K.belegNr(e);
     if (e.typ === 'zbon') {
-      who = 'Kassenabrechnung';
+      who = 'Kassenabrechnung' + (e.znr ? ' #' + e.znr : '');
       const parts = [nr];
       if (e.u19) parts.push('19 %: ' + P.formatCents(e.u19));
       if (e.u7) parts.push('7 %: ' + P.formatCents(e.u7));
@@ -149,14 +153,16 @@
       sub = parts.join(' · ');
       amt = (K.net(e) >= 0 ? '+' : '') + eur(K.net(e));
     } else if (e.typ === 'einnahme') {
-      who = e.text || 'Einnahme'; sub = nr + ' · Einnahme'; amt = '+' + eur(e.betrag);
+      const a = K.artInfo('einnahme', e.art);
+      who = e.text || 'Einnahme'; sub = nr + ' · ' + (a ? a.label : 'Einnahme'); amt = '+' + eur(e.betrag);
     } else if (e.typ === 'storno') {
       who = 'Storno zu Beleg ' + String(e.ref).padStart(4, '0'); sub = nr + ' · ' + (e.grund || ''); amt = (K.net(e) >= 0 ? '+' : '') + eur(K.net(e));
     } else if (e.typ === 'zaehlung') {
       const d = (e.ist || 0) - (e.soll || 0);
       who = 'Kassensturz'; sub = nr + (d ? ' · Differenz ' + eur(d) : ' · stimmt'); amt = eur(e.ist);
     } else {
-      who = e.text || 'Ausgabe'; sub = nr + ' · Ausgabe'; amt = '−' + eur(e.betrag);
+      const a = K.artInfo('ausgabe', e.art);
+      who = e.text || 'Ausgabe'; sub = nr + ' · ' + (a ? a.label : 'Ausgabe') + (e.eigenbeleg ? ' · Eigenbeleg' : ''); amt = '−' + eur(e.betrag);
     }
     if (storniert) sub = 'storniert durch Beleg ' + K.belegNr(storniert) + ' · ' + sub;
     if (e.fotoHash) sub += ' · 📷';
@@ -183,6 +189,11 @@
       warn.textContent = '⚠ Prüfsumme stimmt nicht (Beleg ' + String(CHAIN.at || 0).padStart(4, '0') + ', ' + CHAIN.grund + '). Daten wurden außerhalb der App verändert.';
     } else if (!START) { warn.hidden = false; warn.textContent = 'Bitte zuerst oben den Kassenbestand zu Beginn eintragen.'; }
     else if (negDay) { warn.hidden = false; warn.textContent = '⚠ Kassenbestand ist am ' + deDate(negDay.datum) + ' negativ. Bitte Buchungen prüfen und ggf. stornieren.'; }
+    else if (ENTRIES.length && LAST_BACKUP !== undefined && K.daysBetween((LAST_BACKUP || ENTRIES[0].erfasst || today).slice(0, 10), today) >= 7) {
+      warn.hidden = false;
+      warn.textContent = (LAST_BACKUP ? 'Letzte Datensicherung vor ' + K.daysBetween(LAST_BACKUP.slice(0, 10), today) + ' Tagen.' : 'Noch keine Datensicherung.') +
+        ' Unter „Kassenbuch“ → „Datensicherung“ sichern und z. B. per Mail an euch selbst schicken.';
+    }
     else if (openPast.length && +today.slice(8, 10) >= 5) {
       warn.hidden = false;
       warn.textContent = K.monthLabel(openPast[openPast.length - 1]) + ' ist noch nicht abgeschlossen. Unter „Kassenbuch“ den Monat festschreiben.';
@@ -226,34 +237,49 @@
   }
 
   // ---------- Formulare ----------
+  const SATZ = [{ v: '19', l: '19 %' }, { v: '7', l: '7 %' }, { v: '0', l: '0 % / ohne Umsatzsteuer' }];
+  const artOpts = (typ) => K.ARTEN[typ].map((a) => ({ v: a.key, l: a.label }));
+  const hasVst = (typ) => (v) => { const a = K.artInfo(typ, v.art); return !!(a && a.vst); };
   const FORMS = {
     zbon: {
       title: { scan: 'Kassenabrechnung prüfen', manual: 'Kassenabrechnung eintragen' },
-      fields: [{ key: 'datum', label: 'Datum', type: 'date' }].concat(K.ZBON.map((f) => ({
-        key: f.key, label: f.label + (f.sign < 0 ? ' (wird abgezogen)' : ''), type: 'money'
-      })))
+      fields: [
+        { key: 'datum', label: 'Datum', type: 'date' },
+        { key: 'znr', label: 'Abrechnungs-Nr. (oben auf dem Bon, z. B. #340)', type: 'int', placeholder: 'z. B. 340' }
+      ].concat(K.ZBON.map((f) => ({ key: f.key, label: f.label + (f.sign < 0 ? ' (wird abgezogen)' : ''), type: 'money' })))
     },
     ausgabe: {
       title: { scan: 'Ausgabe prüfen', manual: 'Ausgabe eintragen' },
       fields: [
         { key: 'datum', label: 'Datum', type: 'date' },
-        { key: 'text', label: 'Wofür / bei wem', type: 'text', placeholder: 'z. B. Metro, Bankeinzahlung', required: true },
-        { key: 'betrag', label: 'Betrag', type: 'money', required: true }
+        { key: 'art', label: 'Art der Ausgabe', type: 'select', options: artOpts('ausgabe'), required: true },
+        { key: 'text', label: 'Wofür / bei wem', type: 'text', placeholder: 'z. B. Metro, Sparkasse', required: true },
+        { key: 'betrag', label: 'Betrag (brutto)', type: 'money', required: true },
+        { key: 'satz', label: 'Steuersatz auf dem Beleg', type: 'select', options: SATZ.concat([{ v: 'mix', l: 'gemischt: 19 % und 7 %' }]), required: true, showIf: hasVst('ausgabe') },
+        { key: 'b19', label: 'davon mit 19 %', type: 'money', showIf: (v) => hasVst('ausgabe')(v) && v.satz === 'mix' },
+        { key: 'b7', label: 'davon mit 7 %', type: 'money', showIf: (v) => hasVst('ausgabe')(v) && v.satz === 'mix' },
+        { key: 'eigenbeleg', label: 'Kein Beleg vorhanden (Eigenbeleg)', type: 'check' },
+        { key: 'empfaenger', label: 'Empfänger (wer hat das Geld bekommen?)', type: 'text', required: true, showIf: (v) => v.eigenbeleg },
+        { key: 'ohnegrund', label: 'Warum gibt es keinen Beleg?', type: 'text', required: true, placeholder: 'z. B. Parkautomat ohne Quittung', showIf: (v) => v.eigenbeleg }
       ]
     },
     einnahme: {
       title: { manual: 'Sonstige Einnahme' },
       fields: [
         { key: 'datum', label: 'Datum', type: 'date' },
-        { key: 'text', label: 'Wofür', type: 'text', placeholder: 'z. B. Privateinlage, Wechselgeld', required: true },
-        { key: 'betrag', label: 'Betrag', type: 'money', required: true }
+        { key: 'art', label: 'Art der Einnahme', type: 'select', options: artOpts('einnahme'), required: true },
+        { key: 'text', label: 'Wofür / von wem', type: 'text', placeholder: 'z. B. Wechselgeld Sparkasse', required: true },
+        { key: 'betrag', label: 'Betrag (brutto)', type: 'money', required: true },
+        { key: 'satz', label: 'Steuersatz', type: 'select', options: SATZ, required: true, showIf: hasVst('einnahme') }
       ]
     },
     zaehlung: {
       title: { manual: 'Kassensturz' },
       fields: [
         { key: 'datum', label: 'Datum', type: 'date' },
-        { key: 'ist', label: 'Gezähltes Bargeld in der Kasse', type: 'money', allowZero: true }
+        { key: 'ist', label: 'Gezähltes Bargeld in der Kasse', type: 'money', allowZero: true },
+        { key: 'grund', label: 'Grund für die Differenz', type: 'text', required: true, placeholder: 'z. B. falsch herausgegeben, Ursache unbekannt',
+          showIf: (v) => v.ist !== null && v.ist !== K.balanceAt(ENTRIES, START, v.datum || todayIso()) }
       ]
     },
     storno: {
@@ -261,11 +287,14 @@
       fields: [{ key: 'grund', label: 'Grund für das Storno', type: 'text', placeholder: 'z. B. Betrag falsch erfasst', required: true }]
     },
     start: {
-      title: { edit: 'Kassenbestand zu Beginn' },
+      title: { edit: 'Kassenbuch einrichten' },
       fields: [
-        { key: 'datum', label: 'Stand vom', type: 'date', lock: true },
-        { key: 'betrag', label: 'Bargeld in der Kasse', type: 'money', allowZero: true, lock: true },
-        { key: 'firma', label: 'Name des Geschäfts (steht oben im Kassenbuch)', type: 'text', placeholder: 'optional' }
+        { key: 'datum', label: 'Anfangsbestand: Stand vom', type: 'date', lock: true },
+        { key: 'betrag', label: 'Anfangsbestand: Bargeld in der Kasse', type: 'money', allowZero: true, lock: true },
+        { key: 'firma', label: 'Name des Geschäfts', type: 'text', placeholder: 'erscheint oben im Kassenbuch' },
+        { key: 'anschrift', label: 'Anschrift', type: 'text', placeholder: 'Straße, PLZ Ort' },
+        { key: 'steuernummer', label: 'Steuernummer', type: 'text', placeholder: 'optional' },
+        { key: 'kassierer', label: 'Kassenführer (wer bucht auf diesem Handy?)', type: 'text', placeholder: 'Vor- und Nachname' }
       ]
     }
   };
@@ -293,24 +322,38 @@
     const box = $('fields');
     box.innerHTML = '';
     for (const f of form.fields) {
-      const wrap = el('div', 'field' + (flagged[f.key] ? ' missing' : ''));
+      const wrap = el('div', 'field' + (flagged[f.key] ? ' missing' : '') + (f.type === 'check' ? ' check' : ''));
+      wrap.dataset.key = f.key;
       const id = 'f_' + f.key;
       const label = el('label', '', f.label + (f.type === 'money' ? ' (€)' : ''));
       label.htmlFor = id;
-      const input = document.createElement('input');
-      input.id = id; input.name = f.key;
+      let input;
       const v = entry[f.key];
-      if (f.type === 'date') { input.type = 'date'; input.value = v || ''; input.max = todayIso(); }
-      else if (f.type === 'money') {
-        input.type = 'text'; input.inputMode = 'decimal'; input.className = 'money'; input.autocomplete = 'off';
-        input.placeholder = '0,00'; input.value = v ? P.formatCents(v) : (v === 0 && f.allowZero ? '0,00' : '');
-      } else { input.type = 'text'; input.autocapitalize = 'sentences'; input.value = v || ''; input.placeholder = f.placeholder || ''; }
+      if (f.type === 'select') {
+        input = document.createElement('select');
+        input.appendChild(new Option('Bitte wählen …', ''));
+        for (const o of f.options) input.appendChild(new Option(o.l, o.v));
+        input.value = v === undefined || v === null ? '' : String(v);
+      } else {
+        input = document.createElement('input');
+        if (f.type === 'date') { input.type = 'date'; input.value = v || ''; input.max = todayIso(); }
+        else if (f.type === 'money') {
+          input.type = 'text'; input.inputMode = 'decimal'; input.className = 'money'; input.autocomplete = 'off';
+          input.placeholder = '0,00'; input.value = v ? P.formatCents(v) : (v === 0 && f.allowZero ? '0,00' : '');
+        } else if (f.type === 'int') { input.type = 'text'; input.inputMode = 'numeric'; input.value = v || ''; input.placeholder = f.placeholder || ''; }
+        else if (f.type === 'check') { input.type = 'checkbox'; input.checked = !!v; }
+        else { input.type = 'text'; input.autocapitalize = 'sentences'; input.value = v || ''; input.placeholder = f.placeholder || ''; }
+      }
+      input.id = id; input.name = f.key;
       if (locked && f.lock) input.disabled = true;
-      input.addEventListener('input', () => { wrap.classList.remove('missing'); const n = wrap.querySelector('.note'); if (n) n.remove(); updateCalc(); });
-      wrap.append(label, input);
+      const changed = () => { wrap.classList.remove('missing'); const n = wrap.querySelector('.note'); if (n) n.remove(); updateVisibility(); updateCalc(); };
+      input.addEventListener('input', changed);
+      input.addEventListener('change', changed);
+      if (f.type === 'check') wrap.append(input, label); else wrap.append(label, input);
       if (flagged[f.key]) wrap.appendChild(el('div', 'note', flagged[f.key]));
       box.appendChild(wrap);
     }
+    updateVisibility();
     updateCalc();
     const raw = $('rawBox');
     raw.hidden = true;
@@ -328,6 +371,26 @@
       }
     }
     $('editor').hidden = false;
+  }
+
+  // Aktuelle Formularwerte (für bedingte Felder)
+  function formValues() {
+    const out = {};
+    for (const f of FORMS[editing.entry.typ].fields) {
+      const i = $('f_' + f.key);
+      if (!i) continue;
+      out[f.key] = f.type === 'check' ? i.checked : f.type === 'money' ? readMoney(i.value) : i.value;
+    }
+    return out;
+  }
+  const isShown = (f, vals) => !f.showIf || f.showIf(vals);
+  function updateVisibility() {
+    if (!editing) return;
+    const vals = formValues();
+    for (const f of FORMS[editing.entry.typ].fields) {
+      const w = document.querySelector('.field[data-key="' + f.key + '"]');
+      if (w) w.hidden = !isShown(f, vals);
+    }
   }
 
   // Live-Rechnung bei der Kassenabrechnung bzw. beim Kassensturz
@@ -390,10 +453,12 @@
     const out = Object.assign({}, editing.entry);
     const locked = typ === 'start' && ENTRIES.length > 0;
     let ok = true;
+    const vals = formValues();
     for (const f of FORMS[typ].fields) {
       const input = $('f_' + f.key);
       if (locked && f.lock) continue;
-      let v = input.value.trim();
+      if (!isShown(f, vals)) { delete out[f.key]; continue; }
+      let v = f.type === 'check' ? input.checked : input.value.trim();
       if (f.type === 'money') {
         const c = readMoney(v);
         if (v && (c === null || c < 0)) { mark(input, 'Bitte als Betrag eingeben, z. B. 12,50'); ok = false; continue; }
@@ -401,13 +466,23 @@
         if (f.allowZero && c === null) { mark(input, 'Bitte eintragen (auch 0 ist möglich)'); ok = false; continue; }
         v = c;
       }
-      if (f.type === 'text' && f.required && !v) { mark(input, 'Bitte ausfüllen'); ok = false; continue; }
+      if (f.type === 'int') {
+        if (v && !/^\d{1,6}$/.test(v.replace(/^#/, ''))) { mark(input, 'Bitte nur die Nummer eintragen, z. B. 340'); ok = false; continue; }
+        v = v ? parseInt(v.replace(/^#/, ''), 10) : '';
+      }
+      if ((f.type === 'text' || f.type === 'select') && f.required && !v) { mark(input, f.type === 'select' ? 'Bitte auswählen' : 'Bitte ausfüllen'); ok = false; continue; }
+      if (f.type === 'select' && f.key === 'satz' && v !== 'mix' && v !== '') v = +v;
+      if (f.type === 'check' && !v) { delete out[f.key]; continue; }
       if (f.type === 'date') {
         const err = typ === 'start' ? (!v ? 'Bitte Datum wählen' : v > todayIso() ? 'Datum liegt in der Zukunft' : null)
           : K.checkDate(v, CLOSED, todayIso()) || (START && v < START.datum ? 'Liegt vor dem Anfangsbestand (' + deDate(START.datum) + ')' : null);
         if (err) { mark(input, err); ok = false; continue; }
       }
       out[f.key] = v === '' ? null : v;
+    }
+    if (ok && out.satz === 'mix') {
+      if (!(out.b19 || out.b7)) { mark($('f_b19'), 'Bitte die Anteile eintragen'); ok = false; }
+      else if ((out.b19 || 0) + (out.b7 || 0) > (out.betrag || 0)) { mark($('f_b7'), 'Die Anteile sind größer als der Betrag'); ok = false; }
     }
     if (ok && typ === 'zbon' && !K.ZBON.some((f) => out[f.key])) { mark($('f_u19'), 'Bitte mindestens einen Betrag eintragen'); ok = false; }
     if (!ok) return;
@@ -424,6 +499,13 @@
         out.nachtraeglich = true;
       }
       if (typ === 'zaehlung') return await saveZaehlung(out);
+      if (typ === 'zbon') {
+        if (!out.znr && !confirm('Ohne Abrechnungs-Nr. speichern? Die Nummer steht oben auf dem Bon (z. B. #340) und hilft, fehlende Tage zu erkennen.')) return;
+        const zc = K.znrCheck(ENTRIES, out.znr);
+        if (zc.doppelt && !confirm('Abrechnung #' + out.znr + ' ist schon gebucht (Beleg ' + K.belegNr(zc.doppelt) + ' vom ' + deDate(zc.doppelt.datum) + '). Wirklich noch einmal buchen?')) return;
+        if (zc.luecke && !confirm('Es fehlt ' + (zc.luecke[0] === zc.luecke[1] ? 'Abrechnung #' + zc.luecke[0] : 'Abrechnung #' + zc.luecke[0] + ' bis #' + zc.luecke[1]) +
+          '. Bitte fehlende Abrechnungen zuerst buchen. Trotzdem speichern?')) return;
+      }
       const neg = K.dayBalances(ENTRIES.concat([Object.assign({ nr: 1e9 }, out)]), START).find((d) => d.bestand < 0);
       if (neg && !confirm('Mit dieser Buchung wird der Kassenbestand am ' + deDate(neg.datum) + ' negativ (' + eur(neg.bestand) + '). Das deutet auf einen Fehler hin. Trotzdem speichern?')) return;
 
@@ -437,12 +519,13 @@
 
   async function saveStart(out, locked) {
     const prev = START;
-    const next = locked ? Object.assign({}, prev, { firma: out.firma || '' })
-      : { datum: out.datum, betrag: out.betrag || 0, firma: out.firma || '' };
+    const info = { firma: out.firma || '', anschrift: out.anschrift || '', steuernummer: out.steuernummer || '', kassierer: out.kassierer || '' };
+    const next = locked ? Object.assign({}, prev, info) : Object.assign({ datum: out.datum, betrag: out.betrag || 0 }, info);
     await setSetting('anfangsbestand', next);
     if (!locked && (!prev || prev.betrag !== next.betrag || prev.datum !== next.datum)) {
       await log('Anfangsbestand festgelegt: ' + eur(next.betrag) + ' zum ' + deDate(next.datum));
     }
+    if (prev && (prev.kassierer || '') !== next.kassierer) await log('Kassenführer: ' + (next.kassierer || '(leer)'));
     closeEditor(); await reload(); toast('Gespeichert');
   }
 
@@ -454,7 +537,7 @@
     toast('Beleg ' + K.belegNr(target) + ' storniert (Beleg ' + K.belegNr(e) + ')');
     if (then === 'fix') {
       const copy = {};
-      for (const k of ['typ', 'datum', 'text', 'betrag'].concat(K.ZBON.map((f) => f.key))) if (target[k] !== undefined) copy[k] = target[k];
+      for (const k of ['typ', 'datum', 'text', 'betrag', 'art', 'satz', 'b19', 'b7', 'znr', 'eigenbeleg', 'empfaenger', 'ohnegrund'].concat(K.ZBON.map((f) => f.key))) if (target[k] !== undefined) copy[k] = target[k];
       if (K.checkDate(copy.datum, CLOSED, todayIso())) copy.datum = todayIso();
       openEditor(copy, { mode: 'manual', korrekturVon: target.nr, title: 'Korrektur zu Beleg ' + K.belegNr(target) });
     }
@@ -466,14 +549,15 @@
     const d = out.ist - out.soll;
     let msg = 'Kassensturz gebucht (Beleg ' + K.belegNr(z) + ')';
     if (d) {
-      const k = await book({ typ: d > 0 ? 'einnahme' : 'ausgabe', datum: out.datum, text: 'Kassendifferenz laut Kassensturz Beleg ' + K.belegNr(z), betrag: Math.abs(d) });
+      const k = await book({ typ: d > 0 ? 'einnahme' : 'ausgabe', art: 'kassendiff', satz: null, datum: out.datum,
+        text: 'Kassendifferenz laut Kassensturz Beleg ' + K.belegNr(z) + (out.grund ? ': ' + out.grund : ''), betrag: Math.abs(d) });
       msg += ', Differenz ' + eur(d) + ' als Beleg ' + K.belegNr(k);
     }
     closeEditor(); await reload(); toast(msg, 4000);
   }
 
   function openStart() {
-    openEditor({ typ: 'start', datum: START ? START.datum : todayIso(), betrag: START ? START.betrag : null, firma: START ? START.firma : '' }, { mode: 'edit' });
+    openEditor(Object.assign({ typ: 'start', datum: todayIso(), betrag: null }, START || {}, { typ: 'start' }), { mode: 'edit' });
   }
 
   // ---------- Detailansicht einer Buchung (nur lesen, Storno/Korrektur) ----------
@@ -491,11 +575,16 @@
     if (st) row('Status', 'storniert durch Beleg ' + K.belegNr(st) + ': ' + (st.grund || ''), 'bad');
     if (e.typ === 'storno') row('Storniert', 'Beleg ' + String(e.ref).padStart(4, '0') + ' – Grund: ' + (e.grund || ''));
     if (e.korrektur_von) row('Korrektur zu', 'Beleg ' + String(e.korrektur_von).padStart(4, '0'));
-    if (e.typ === 'zaehlung') { row('Gezählt', eur(e.ist)); row('Soll', eur(e.soll)); row('Differenz', eur(e.ist - e.soll)); }
+    if (e.typ === 'zaehlung') { row('Gezählt', eur(e.ist)); row('Soll', eur(e.soll)); row('Differenz', eur(e.ist - e.soll)); if (e.grund) row('Grund', e.grund); }
+    if (e.znr) row('Abrechnungs-Nr.', '#' + e.znr);
+    const ai = K.artInfo(e.typ, e.art);
+    if (ai) row('Art', ai.label);
+    if (e.eigenbeleg) { row('Eigenbeleg', 'kein Fremdbeleg vorhanden'); row('Empfänger', e.empfaenger || ''); row('Grund', e.ohnegrund || ''); }
+    if (e.kassierer) row('Gebucht von', e.kassierer);
     for (const l of K.lines(e)) {
       if (l.info) continue;
       const a = l.ein - l.aus;
-      row(l.text.replace(/^Kassenabrechnung /, ''), (a > 0 ? '+' : '') + eur(a));
+      row(l.text.replace(/^Kassenabrechnung (#\d+ )?/, '') + (l.satz ? ' · ' + (l.vst ? 'VSt' : 'USt') + ' ' + eur(l.ust) : ''), (a > 0 ? '+' : '') + eur(a));
     }
     const locked = !!K.checkDate(e.datum, CLOSED, todayIso()) && e.datum <= todayIso();
     row('Prüfsumme', (e.hash || '').slice(0, 16) + '…', 'mono');
@@ -664,9 +753,13 @@
       const st = m ? (isClosed(m) ? 'festgeschrieben 🔒' : 'noch offen') : '';
       choose(m ? 'Kassenbuch ' + K.monthLabel(m) : 'Kassenbuch gesamt', st, opts);
     };
+    const sicherung = [
+      { label: 'Datensicherung (alle Daten)', sub: 'ZIP mit Buchungsjournal (CSV), allen Daten, Belegfotos und Prüfsummen', run: backup },
+      { label: 'Prüfsumme senden (Nachweis)', sub: 'Aktuellen Stand z. B. per Mail an den Steuerberater schicken', run: shareHash }
+    ];
     const opts = months.map((m) => ({ label: K.monthLabel(m) + (isClosed(m) ? ' 🔒' : ''), sub: isClosed(m) ? 'festgeschrieben' : (closable.indexOf(m) >= 0 ? 'kann abgeschlossen werden' : 'laufender Monat'), run: pick(m) }));
     opts.push({ label: 'Alle Buchungen', sub: 'Vom Anfangsbestand bis heute', run: pick(null) });
-    choose('Kassenbuch', 'Für welchen Monat?', opts);
+    choose('Kassenbuch', 'Für welchen Monat?', opts.concat(sicherung));
   }
   const isClosed = (m) => !!(CLOSED[m] || (K.closedUntil(CLOSED) && m <= K.closedUntil(CLOSED)));
 
@@ -715,11 +808,86 @@
     }
     const proto = (await allProtokoll()).filter((p) => !month || (p.monat ? p.monat === month : (p.am || '').slice(0, 7) === month));
     const out = window.KassenbuchPdf.build(ENTRIES, START, month, {
-      firma: START.firma || '', closed: CLOSED, chain: CHAIN, protokoll: proto, fotos: fotos
+      firma: START.firma || '', anschrift: START.anschrift || '', steuernummer: START.steuernummer || '', closed: CLOSED, chain: CHAIN, protokoll: proto, fotos: fotos
     });
     const blob = new Blob([out.bytes], { type: 'application/pdf' });
     const name = (month ? 'Kassenbuch_' + month : 'Kassenbuch_gesamt_' + todayIso()) + (withPhotos ? '_mit_Belegen' : '') + '.pdf';
     await deliver(blob, name, 'Kassenbuch ' + (month ? K.monthLabel(month) : 'gesamt'));
+  }
+
+  // ---------- Datensicherung (maschinell auswertbar) und Prüfsummen-Nachweis ----------
+  const csvCell = (v) => { v = v === null || v === undefined ? '' : String(v); return /[;"\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+  const csvMoney = (c) => c ? (c / 100).toFixed(2).replace('.', ',') : '';
+
+  function journalCsv() {
+    const head = ['Beleg', 'Buchungsdatum', 'Erfasst', 'Typ', 'Art', 'Buchungstext', 'Einnahme', 'Ausgabe', 'Steuersatz', 'USt', 'VSt',
+      'Abrechnungs_Nr', 'Storno_zu_Beleg', 'Storniert_durch', 'Grund', 'Eigenbeleg', 'Empfaenger', 'Grund_ohne_Beleg', 'Kassenfuehrer', 'Foto_SHA256', 'Pruefsumme_SHA256'];
+    const sm = K.stornoMap(ENTRIES);
+    const rows = [head.join(';')];
+    for (const e of K.sortEntries(ENTRIES)) {
+      for (const l of K.lines(e)) {
+        rows.push([K.belegNr(e), e.datum, e.erfasst, K.TYP_NAME[e.typ] || e.typ, l.art || '', l.text, csvMoney(l.ein), csvMoney(l.aus),
+          l.satz === null || l.satz === undefined ? '' : l.satz, l.vst ? '' : csvMoney(l.ust), l.vst ? csvMoney(l.ust) : '',
+          e.znr || '', e.ref ? String(e.ref).padStart(4, '0') : '', sm[e.nr] ? K.belegNr(sm[e.nr]) : '', e.grund || '',
+          e.eigenbeleg ? 'ja' : '', e.empfaenger || '', e.ohnegrund || '', e.kassierer || '', e.fotoHash || '', e.hash || ''].map(csvCell).join(';'));
+      }
+    }
+    return '\ufeff' + rows.join('\r\n') + '\r\n';
+  }
+
+  async function backup() {
+    toast('Datensicherung wird erstellt …', 2000);
+    const enc = new TextEncoder();
+    const now = new Date();
+    const stamp = now.toISOString();
+    const files = [];
+    const proto = await allProtokoll();
+    const data = { format: 'kassenbuch-app', app_version: APP_VERSION, erstellt: stamp, anfangsbestand: START, festgeschrieben: CLOSED,
+      pruefsummen: { verfahren: 'SHA-256 über die kanonische Form je Buchung, verkettet über das Feld prev', ok: CHAIN.ok, buchungen: CHAIN.count, letzte: CHAIN.last || null },
+      protokoll: proto, buchungen: K.sortEntries(ENTRIES).sort((a, b) => a.nr - b.nr).map((e) => { const c = Object.assign({}, e); delete c.id; return c; }) };
+    files.push({ name: 'buchungsjournal.csv', data: enc.encode(journalCsv()) });
+    files.push({ name: 'kassenbuch.json', data: enc.encode(JSON.stringify(data, null, 2)) });
+    let n = 0;
+    for (const e of ENTRIES) {
+      if (!e.fotoHash) continue;
+      const b = await getBeleg(e.nr);
+      if (b) { files.push({ name: 'belege/' + K.belegNr(e) + '.jpg', data: new Uint8Array(await b.blob.arrayBuffer()) }); n++; }
+    }
+    files.push({ name: 'pruefsumme.txt', data: enc.encode(hashText(now) + '\r\n') });
+    files.push({ name: 'LIESMICH.txt', data: enc.encode([
+      'Datensicherung Kassenbuch-App vom ' + deStamp(stamp),
+      '',
+      'buchungsjournal.csv  Alle Buchungszeilen (Semikolon-getrennt, UTF-8), maschinell auswertbar',
+      'kassenbuch.json      Alle Daten unverändert, inkl. Prüfsummen, Protokoll, Festschreibungen',
+      'belege/              Fotos der Kassenabrechnungen (Dateiname = Belegnummer)',
+      'pruefsumme.txt       Stand und Prüfsumme der letzten Buchung',
+      '',
+      'Jede Buchung trägt eine SHA-256-Prüfsumme (hash) und die Prüfsumme der vorherigen Buchung (prev).',
+      'Fotos sind über Foto_SHA256 mit der Buchung verbunden.'
+    ].join('\r\n')) });
+    const blob = window.XlsxLite.zip(files, 'application/zip');
+    await setSetting('letzteSicherung', stamp);
+    await log('Datensicherung erstellt: ' + ENTRIES.length + ' Buchungen, ' + n + ' Fotos, Prüfsumme ' + (CHAIN.last || '').slice(0, 16) + '…');
+    await deliver(blob, 'Kassenbuch_Sicherung_' + todayIso() + '.zip', 'Kassenbuch Datensicherung');
+    await reload();
+  }
+
+  function hashText(now) {
+    const last = ENTRIES.reduce((m, e) => (!m || e.nr > m.nr ? e : m), null);
+    return 'Kassenbuch ' + (START && START.firma ? START.firma + ' ' : '') + '– Stand ' + deStamp((now || new Date()).toISOString()) + ': ' +
+      ENTRIES.length + ' Buchungen, letzte Buchung Beleg ' + (last ? K.belegNr(last) + ' vom ' + deDate(last.datum) : '–') +
+      ', Prüfsummen ' + (CHAIN.ok ? 'in Ordnung' : 'FEHLERHAFT') + '. SHA-256 der letzten Buchung: ' + (CHAIN.last || '–');
+  }
+
+  async function shareHash() {
+    const text = hashText();
+    if (navigator.share) {
+      try { await navigator.share({ title: 'Kassenbuch Prüfsumme', text: text }); await log('Prüfsumme geteilt: ' + (CHAIN.last || '').slice(0, 16) + '…'); return; }
+      catch (e) { if (e.name === 'AbortError') return; }
+    }
+    try { await navigator.clipboard.writeText(text); toast('Prüfsumme kopiert – z. B. in eine Mail einfügen', 3500); }
+    catch (e) { alert(text); }
+    await log('Prüfsumme kopiert: ' + (CHAIN.last || '').slice(0, 16) + '…');
   }
 
   async function exportExcel(month) {
